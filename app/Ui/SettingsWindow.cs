@@ -65,6 +65,13 @@ public sealed class SettingsWindow : FluentWindow
     private readonly ToggleSwitch _autoStartSwitch;
     private InstrumentalListWindow? _marksWindow;
     private bool _loading = true;
+    // v0.8.1 双列布局：卡片按 id 注册，容器（左列/右列/单列回落）由 ApplyCardLayout 按窗宽切换
+    private readonly System.Collections.Generic.Dictionary<string, Card> _cardsById = new();
+    private readonly Grid _cardsHost = new();
+    private readonly StackPanel _colLeft = new();
+    private readonly StackPanel _colRight = new();
+    private readonly StackPanel _singlePanel = new();
+    private bool? _twoColMode;
 
     /// <summary>任意设置变化（主程序据此重套悬浮窗样式；持久化走 Settings.RequestSave 防抖）。</summary>
     public event Action? LiveChanged;
@@ -153,10 +160,11 @@ public sealed class SettingsWindow : FluentWindow
         _settings = settings;
         // v0.8：版本号动态取程序集版本，别再硬编码（旧标题里写死过旧版号）
         Title = $"Spotify 歌词 · 设置 v{UpdateService.CurrentVersion}";
-        Width = 500;
-        Height = 760;
-        MinWidth = 440;
-        MinHeight = 480;
+        // v0.8.1：500×760 竖长条改近方形（920×660），卡片双列排布（见 Core.SettingsLayout）
+        Width = SettingsLayout.DefaultWidth;
+        Height = SettingsLayout.DefaultHeight;
+        MinWidth = SettingsLayout.MinWidth;
+        MinHeight = SettingsLayout.MinHeight;
         ResizeMode = ResizeMode.CanResizeWithGrip;
         ExtendsContentIntoTitleBar = true;
         // 深色三套全关 Mica（系统材质不吃背景覆写，几套会被罩成一个样，见 Theme.Backdrop），浅色保留
@@ -175,10 +183,10 @@ public sealed class SettingsWindow : FluentWindow
         Grid.SetRow(titleBar, 0);
         root.Children.Add(titleBar);
 
-        var panel = new StackPanel { Margin = new Thickness(14, 10, 14, 14) };
+        _cardsHost.Margin = new Thickness(14, 10, 14, 14);
 
         // ===== 卡片 1：外观与逐字（含界面主题） =====
-        var look = CardPanel(panel, "外观与逐字（改动实时生效，自动保存）");
+        var look = CardPanel("look", "外观与逐字（改动实时生效，自动保存）");
 
         look.Children.Add(new TextBlock { Text = "界面主题", FontSize = 13.5, Margin = new Thickness(0, 2, 0, 0) });
         _themeCombo = new ComboBox { Margin = new Thickness(0, 6, 0, 4) };
@@ -233,7 +241,7 @@ public sealed class SettingsWindow : FluentWindow
             v => _settings.PositionLocked = v);
 
         // ===== 卡片 2：译文与翻译（v0.8 新卡：译文相关从「外观与逐字」拆出独立成卡） =====
-        var transBody = CardPanel(panel, "译文与翻译");
+        var transBody = CardPanel("trans", "译文与翻译");
         _showTrans = AddSwitchRow(transBody, "显示译文（歌词源带译文时）",
             v => { _settings.ShowTranslation = v; AppLog.WriteLimited("set-showtrans", $"[设置] 显示译文 = {v}", 5000); });
         _simpSwitch = AddSwitchRow(transBody, "繁体转简体显示（原文与自带译文，只转显示不改原文）",
@@ -330,7 +338,7 @@ public sealed class SettingsWindow : FluentWindow
         transBody.Children.Add(_credMs);
 
         // ===== 卡片 3：颜色 =====
-        var colorBody = CardPanel(panel, "颜色");
+        var colorBody = CardPanel("color", "颜色");
         _hiRow = BuildColorRow(colorBody, "当前行高亮颜色（已唱过的部分）", first: true,
             () => _settings.HighlightColorHex, v => _settings.HighlightColorHex = v);
         _textRow = BuildColorRow(colorBody, "其余文字颜色（未唱部分 / 下一行）", first: false,
@@ -349,7 +357,7 @@ public sealed class SettingsWindow : FluentWindow
         colorBody.Children.Add(reset);
 
         // ===== 卡片 4：背景与时间 =====
-        var timeBody = CardPanel(panel, "背景与时间");
+        var timeBody = CardPanel("time", "背景与时间");
         timeBody.Children.Add(new TextBlock
         {
             Text = "背景框透明度（0 ~ 100，0 = 只显示文字无背景框，推荐）",
@@ -387,7 +395,7 @@ public sealed class SettingsWindow : FluentWindow
         timeBody.Children.Add(offsetRow);
 
         // ===== 卡片 5：字体与歌词源 =====
-        var fontBody = CardPanel(panel, "字体与歌词源");
+        var fontBody = CardPanel("font", "字体与歌词源");
         fontBody.Children.Add(new TextBlock { Text = "字体（默认 Microsoft YaHei UI，列表显示中文名）", FontSize = 13.5 });
         _fontCombo = new ComboBox { Margin = new Thickness(0, 6, 0, 0), ItemTemplate = FontItemTemplate() };
         var choices = Fonts.SystemFontFamilies
@@ -420,7 +428,7 @@ public sealed class SettingsWindow : FluentWindow
         fontBody.Children.Add(_mxmKey);
 
         // ===== 卡片 6：纯音乐标记 =====
-        var marks = CardPanel(panel, "纯音乐标记（被标记的曲目不再取词）");
+        var marks = CardPanel("marks", "纯音乐标记（被标记的曲目不再取词）");
         _marksCount = new TextBlock { Foreground = Theme.SubTextBrush, FontSize = 12, TextWrapping = TextWrapping.Wrap };
         marks.Children.Add(_marksCount);
         // v0.8：名单管理独立成窗（逐条移除 + 清空全部都在那边），本卡只留计数 + 入口按钮
@@ -429,7 +437,7 @@ public sealed class SettingsWindow : FluentWindow
         marks.Children.Add(viewMarks);
 
         // ===== 卡片 7：诊断与缓存 =====
-        var logBody = CardPanel(panel, "诊断与缓存（日志 + 歌词缓存）");
+        var logBody = CardPanel("log", "诊断与缓存（日志 + 歌词缓存）");
         logBody.Children.Add(new TextBlock
         {
             Text = AppLog.LogPath,
@@ -454,7 +462,7 @@ public sealed class SettingsWindow : FluentWindow
         logBody.Children.Add(clearCacheBtn);
 
         // ===== 卡片 8：更新与启动 =====
-        var upd = CardPanel(panel, "更新与启动");
+        var upd = CardPanel("update", "更新与启动");
         upd.Children.Add(new TextBlock
         {
             Text = "仓库已转公开：不填令牌也能检查更新（匿名）。令牌框保留备用——仓库以后切回私有时，" +
@@ -541,7 +549,7 @@ public sealed class SettingsWindow : FluentWindow
 
         var scroll = new ScrollViewer
         {
-            Content = panel,
+            Content = _cardsHost,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
         };
@@ -556,12 +564,19 @@ public sealed class SettingsWindow : FluentWindow
             _settings.RequestSave();
         });
 
+        // v0.8.1：卡片排布按窗宽切换双列/单列（阈值见 SettingsLayout.TwoColumnMinWidth）
+        ApplyCardLayout(SettingsLayout.UseTwoColumns(Width));
+        SizeChanged += (_, _) => ApplyCardLayout(SettingsLayout.UseTwoColumns(ActualWidth));
+
         LoadIntoControls();
         _loading = false;
     }
 
-    /// <summary>卡片容器：库 Card + 标题行 + 内容面板，返回内容面板供填充。</summary>
-    private static StackPanel CardPanel(StackPanel parent, string title)
+    /// <summary>
+    /// 卡片容器（v0.8.1 改注册制）：库 Card + 标题行 + 内容面板，返回内容面板供填充；
+    /// Card 本身先按 id 登记进 _cardsById，挂到哪列由 ApplyCardLayout 统一排（双列/单列可切换）。
+    /// </summary>
+    private StackPanel CardPanel(string id, string title)
     {
         var body = new StackPanel();
         var card = new Card
@@ -575,8 +590,45 @@ public sealed class SettingsWindow : FluentWindow
             Text = title, FontSize = 14, FontWeight = FontWeights.SemiBold,
             Margin = new Thickness(0, 0, 0, 6)
         });
-        parent.Children.Add(card);
+        _cardsById[id] = card;
         return body;
+    }
+
+    /// <summary>
+    /// v0.8.1 卡片排布：双列（左 外观→颜色→背景与时间→译文与翻译；右 字体→纯音乐→诊断→更新）
+    /// 或单列回落（左列序+右列序顺排）。卡序与阈值全在 Core.SettingsLayout，本方法只搬控件：
+    /// 先把八张卡从旧容器摘下，再按目标列序挂入对应列面板。模式未变时直接返回。
+    /// </summary>
+    private void ApplyCardLayout(bool twoCol)
+    {
+        if (_twoColMode == twoCol) return;
+        _twoColMode = twoCol;
+        foreach (var card in _cardsById.Values)
+            (card.Parent as Panel)?.Children.Remove(card);
+        _cardsHost.Children.Clear();
+        _cardsHost.ColumnDefinitions.Clear();
+        _colLeft.Children.Clear();
+        _colRight.Children.Clear();
+        _singlePanel.Children.Clear();
+        if (twoCol)
+        {
+            _cardsHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            _cardsHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            _colRight.Margin = new Thickness(SettingsLayout.ColumnGap, 0, 0, 0);
+            foreach (string id in SettingsLayout.LeftColumn) _colLeft.Children.Add(_cardsById[id]);
+            foreach (string id in SettingsLayout.RightColumn) _colRight.Children.Add(_cardsById[id]);
+            Grid.SetColumn(_colLeft, 0);
+            Grid.SetColumn(_colRight, 1);
+            _cardsHost.Children.Add(_colLeft);
+            _cardsHost.Children.Add(_colRight);
+        }
+        else
+        {
+            _cardsHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            foreach (string id in SettingsLayout.SingleColumn) _singlePanel.Children.Add(_cardsById[id]);
+            Grid.SetColumn(_singlePanel, 0);
+            _cardsHost.Children.Add(_singlePanel);
+        }
     }
 
     /// <summary>

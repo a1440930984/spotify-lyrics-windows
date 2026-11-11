@@ -147,16 +147,18 @@ public static class Program
             var r = await UpdateService.CheckLatestAsync(_settings.GithubToken);
             HandleCheckResult(r, manual: true);
         };
-        // v0.8：托盘「重置歌词窗位置」——清位置记忆并挪回默认位（首开同款：居中、距顶 120），
+        // v0.8：托盘「重置歌词窗位置」——清位置记忆并挪回默认位（首开同款公式），
         // 治悬浮窗被拖出屏幕/换显示器后找不回来。
+        // v0.8.1：默认位改屏幕底部居中（WindowPlacement.BottomMargin），与首开一致。
         _tray.ResetFloatingPosition += () =>
         {
             _settings.FloatingX = null;
             _settings.FloatingY = null;
             _settings.RequestSave();
             var wa = SystemParameters.WorkArea;
+            double winH = _floating.ActualHeight > 0 ? _floating.ActualHeight : _floating.Height;
             var (left, top) = WindowPlacement.DefaultFloatingPosition(
-                wa.Left, wa.Top, wa.Width, _floating.Width);
+                wa.Left, wa.Top, wa.Width, wa.Height, _floating.Width, winH);
             _floating.Left = left;
             _floating.Top = top;
             if (!_settings.FloatingEnabled)

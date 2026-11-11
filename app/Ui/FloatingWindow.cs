@@ -4,7 +4,6 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
 using SpotifyLyricsWin.Core;
 
 namespace SpotifyLyricsWin.Ui;
@@ -48,6 +47,8 @@ public sealed class FloatingWindow : Window
 
     private string _lastCurrent = "\0";
     private bool _dimmed;
+    /// <summary>v0.8.1：无位置记忆首开时，等首次 SizeChanged 再按底部居中公式落点。</summary>
+    private bool _pendingDefaultPlacement;
     /// <summary>v0.8：广告提示模式——提示行强制固定白色，不吃用户的高亮/文字颜色设置。</summary>
     private bool _adHintActive;
     private Point _dragStartScreen;
@@ -90,8 +91,9 @@ public sealed class FloatingWindow : Window
         // 模糊核把阴影涂满行盒的矩形范围；在浅色桌面上就成了用户截图里那层
         // 「浅色雾面矩形」——与背景画刷无关（窗口/根 Border 经审计：Window.Background
         // 恒透明、根 Border 在透明度 0 时 Background=Transparent、无边框、无其他色层）。
-        // 处置：渐变行去掉 Effect，只留控件内部那遍字形阴影（跟着字走、不成矩形）；
-        // 下一行 TextBlock 没有内部阴影，保留 Effect 但降到很轻（模糊 2、透明 0.5）。
+        // 处置：渐变行去掉 Effect，只留控件内部那遍字形阴影（跟着字走、不成矩形）。
+        // v0.8.1 加固：Sun 真机仍报不透明，本版把歌词区所有 Effect 清零（下一行/按钮
+        // 也不例外）、alpha=0 时背景改设 null（见 ApplyStyle），并加 [透明诊断] 日志。
         _currentLine = new GradientLyricLine();
 
         // 译文用渐变行控件（与当前行同机制：按进度做字粒度渐变扫光）；
@@ -103,21 +105,15 @@ public sealed class FloatingWindow : Window
             Margin = new Thickness(0, 2, 0, 0),
             Visibility = Visibility.Collapsed
         };
-        var nextShadow = new DropShadowEffect
-        {
-            Color = Colors.Black,
-            Opacity = 0.5,
-            Direction = 270,
-            ShadowDepth = 1,
-            BlurRadius = 2
-        };
+        // v0.8.1：下一行也不再挂任何 Effect（v0.8 只把参数降轻、Sun 真机仍报不透明）——
+        // 悬浮窗歌词区的阴影从本版起只剩渐变行 OnRender 内部按字形手绘的那一遍，
+        // 任何 Effect 都不许再出现在歌词区（它是对整块位图模糊，天然成矩形）。
         _nextBlock = new TextBlock
         {
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 7, 0, 0),
-            Opacity = 0.6,
-            Effect = nextShadow
+            Opacity = 0.6
         };
 
         var stack = new StackPanel();
@@ -127,14 +123,7 @@ public sealed class FloatingWindow : Window
 
         // ---- 按钮组：锁定 + 关闭（Overlay 层，悬停才显示） ----
         // 胶囊衬底保留 v0.5 的决定：深色半透明底让图标在白底黑底下都清晰。
-        var buttonShadow = new DropShadowEffect
-        {
-            Color = Colors.Black,
-            Opacity = 0.95,
-            Direction = 270,
-            ShadowDepth = 1,
-            BlurRadius = 3
-        };
+        // v0.8.1：按钮也不挂 Effect（同上，透明加固全量清零）；图标辨识靠胶囊衬底。
         _lockButton = new Button
         {
             Width = 36,
@@ -147,7 +136,6 @@ public sealed class FloatingWindow : Window
             Cursor = Cursors.Hand,
             Margin = new Thickness(0, 0, 2, 0),
             ToolTip = "锁定/解锁位置",
-            Effect = buttonShadow,
             FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
             // 幽灵按钮（v0.6）：自绘模板 + 无焦点框，杜绝默认模板的选中/聚焦系统底色
             Template = GhostButtonTemplate(),
@@ -166,7 +154,6 @@ public sealed class FloatingWindow : Window
             BorderThickness = new Thickness(0),
             FontSize = 14,
             Cursor = Cursors.Hand,
-            Effect = buttonShadow,
             ToolTip = "隐藏歌词",
             Template = GhostButtonTemplate(),
             FocusVisualStyle = null,
@@ -255,9 +242,21 @@ public sealed class FloatingWindow : Window
 
         // 内容高度变化（单/双行切换、字号变化）时保持窗口垂直中心不动，用户感知的歌词位置不跳。
         // 按钮带已移出布局流，不再有带高动画需要豁免。
+        // v0.8.1：无位置记忆的首开要等首次拿到真实高度后，才能按「底部居中」公式落点
+        // （构造时 SizeToContent 高度未定），故先立旗、在第一次 SizeChanged 时落点。
         double lastHeight = -1;
         SizeChanged += (_, e) =>
         {
+            if (_pendingDefaultPlacement && e.NewSize.Height > 0)
+            {
+                _pendingDefaultPlacement = false;
+                var wa = SystemParameters.WorkArea;
+                var (dl, dt) = WindowPlacement.DefaultFloatingPosition(
+                    wa.Left, wa.Top, wa.Width, wa.Height, e.NewSize.Width, e.NewSize.Height);
+                Left = dl; Top = dt;
+                lastHeight = e.NewSize.Height;
+                return;
+            }
             if (lastHeight > 0 && !_dragging &&
                 Math.Abs(e.NewSize.Height - lastHeight) > 0.5 && !double.IsNaN(Top))
             {
@@ -274,14 +273,17 @@ public sealed class FloatingWindow : Window
         MouseLeave += (_, _) => HideBand();
         MouseDoubleClick += (_, _) => SettingsRequested?.Invoke();
 
-        // 初始位置：设置里存的坐标，或顶部居中（安卓 floatingY 默认 120）
+        // 初始位置：设置里存的坐标优先；无记忆时默认**屏幕底部居中**（v0.8.1 定案，
+        // 公式见 Core.WindowPlacement，与托盘复位同款）。构造时高度未定，先水平居中、
+        // 立旗等首次 SizeChanged 拿到真实高度后按公式定 Top（见上方 SizeChanged）。
         if (settings.FloatingX is double fx && settings.FloatingY is double fy)
         { Left = fx; Top = fy; }
         else
         {
             var wa = SystemParameters.WorkArea;
             Left = wa.Left + (wa.Width - Width) / 2;
-            Top = wa.Top + 120;
+            Top = wa.Top;
+            _pendingDefaultPlacement = true;
         }
         UpdateLockButton();
         ApplyStyle();
@@ -383,7 +385,10 @@ public sealed class FloatingWindow : Window
     {
         // v0.7 解耦铁律：窗口本体背景恒透明，每次套样式都重申——主题系统或任何外部
         // 改动都不能让悬浮窗长出底色；可见背景只有下方根 Border 一处。
-        Background = Brushes.Transparent;
+        // v0.8.1 加固：alpha=0 时窗口与根 Border 的背景直接设 **null**（连 Transparent
+        // 画刷都不挂，渲染层无物可画）；alpha>0 时窗口仍重申 Transparent 防外部改动。
+        int alpha0 = _settings.BgAlphaPercent;
+        Background = alpha0 <= 0 ? null : Brushes.Transparent;
 
         var hi = ParseHex(_settings.HighlightColorHex, Color.FromArgb(0xFF, 0x1E, 0xD7, 0x60));
         var normal = ParseHex(_settings.TextColorHex, Colors.White);
@@ -409,11 +414,31 @@ public sealed class FloatingWindow : Window
         _nextBlock.Foreground = new SolidColorBrush(normal);
         if (!_dimmed) _nextBlock.Opacity = 0.6;
 
-        // 唯一的背景来源：「背景透明度」设置（0 = 全透明纯文字）
+        // 唯一的背景来源：「背景透明度」设置（0 = 全透明纯文字）。
+        // v0.8.1：alpha=0 时根 Border 背景设 null（不是 Transparent 画刷）、边框画刷恒 null，
+        // 渲染层在透明模式下无任何色层可画；alpha>0 才刷半透明黑底（老行为不变）。
         int alpha = _settings.BgAlphaPercent;
+        _rootBorder.BorderBrush = null;
         _rootBorder.Background = alpha <= 0
-            ? Brushes.Transparent
+            ? null
             : new SolidColorBrush(Color.FromArgb((byte)(alpha * 255 / 100), 0, 0, 0));
+
+        // v0.8.1 透明诊断：把有效值快照限频写进日志，Sun 再复现可直接回传这行定因。
+        int effectCount = 0;
+        foreach (var el in new UIElement[] { _currentLine, _translationLine, _nextBlock, _lockButton, _closeButton })
+            if (el.Effect != null) effectCount++;
+        string DescribeBrush(Brush? b) => b switch
+        {
+            null => "null",
+            SolidColorBrush sc => $"Solid(#{sc.Color.A:X2}{sc.Color.R:X2}{sc.Color.G:X2}{sc.Color.B:X2})",
+            _ => b.GetType().Name
+        };
+        AppLog.WriteLimited("transparency-diag",
+            TransparencyDiag.Format(
+                DescribeBrush(Background),
+                DescribeBrush(_rootBorder.Background),
+                effectCount, alpha),
+            10_000);
 
         UpdateLockButton();
         AdaptWidth();
