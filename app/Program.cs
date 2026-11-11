@@ -53,6 +53,8 @@ public static class Program
     // v0.4 自动更新
     private static Application _app = null!;
     private static ReleaseInfo? _pendingRelease;
+    // v0.8.3：更新下载的取消令牌（设置窗「取消下载」按钮经事件打到这里）
+    private static CancellationTokenSource? _updateCts;
     private static string? _startupUpdateNote;
 
     [STAThread]
@@ -82,6 +84,9 @@ public static class Program
         // 从未命中就没文件，用户找不到）。路径：%AppData%/SpotifyLyricsWin/log.txt
         AppLog.EnsureFile();
         AppLog.Write($"[启动] SpotifyLyricsWin v{UpdateService.CurrentVersion} 启动");
+        // v0.8.3：图标自报一行（来源/装机 app.ico 指纹/帧列表）——图标对不对版，
+        // Sun 回传日志即可实锤，不用再靠肉眼比对截图。
+        AppIcon.ReportToLog();
 
         // v0.4：先看上次自动更新的结果（Updater 写的 update-result.json），汇报一次后删掉
         var lastResult = UpdateService.ReadResult();
@@ -122,6 +127,8 @@ public static class Program
         if (_settings.FloatingEnabled) _floating.Show();
         _floating.SetHint(_statusHint);
         _floating.SetDimmed(true);
+        // v0.8.3：透明自检探针——启动 5 秒后采一次悬浮窗的屏幕实际像素（只记录）
+        ScheduleTransparencyProbe(5000);
 
         _tray = new Tray();
         _tray.ToggleFloating += () =>
@@ -480,6 +487,8 @@ public static class Program
         // 且悬浮窗套了空 Style 隔离隐含样式——主题资源再怎么刷新也盖不住。
         _floating.ApplyStyle();
         AppLog.Write($"[设置] 界面主题切换为「{Theme.Current.DisplayName}」（{_settings.UiTheme}）");
+        // v0.8.3：主题切换是「变白案」的已知触发点——切换后 2 秒采一次屏幕实测像素取证
+        ScheduleTransparencyProbe(2000);
         if (_manualWindow != null) { var m = _manualWindow; _manualWindow = null; m.Close(); }
         if (_settingsWindow != null)
         {
@@ -488,6 +497,21 @@ public static class Program
             w.Close();
         }
         OpenSettings();
+    }
+
+    /// <summary>
+    /// v0.8.3 透明自检探针调度：延时一次性采样悬浮窗的屏幕实际像素并写日志
+    /// （Ui.TransparencyProbe，只记录不修复；窗口不可见/采样失败静默跳过）。
+    /// </summary>
+    private static void ScheduleTransparencyProbe(int delayMs)
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(delayMs) };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            TransparencyProbe.Sample(_floating, _settings);
+        };
+        timer.Start();
     }
 
     /// <summary>手动打开入口（托盘/悬浮窗/气泡/主题换装重开）：走设置窗的位置记忆。</summary>
@@ -530,6 +554,8 @@ public static class Program
         _settingsWindow.InstrumentalMarksChanged += () =>
             AppLog.Write("[设置] 纯音乐标记名单已清空");
         _settingsWindow.InstallUpdateRequested += RunInstallUpdate;
+        // v0.8.3：下载中点「取消下载」→ 取消当前下载的令牌源（没有正在下载的则无操作）
+        _settingsWindow.CancelDownloadRequested += () => _updateCts?.Cancel();
         _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         if (_pendingRelease != null)
         {
@@ -594,6 +620,9 @@ public static class Program
             return;
         }
         win?.SetInstallEnabled(false);
+        // v0.8.3：每次安装新建取消令牌源（设置窗「取消下载」打到 _updateCts）
+        _updateCts?.Dispose();
+        _updateCts = new CancellationTokenSource();
         try
         {
             Directory.CreateDirectory(UpdateService.UpdateWorkDir);
@@ -604,7 +633,7 @@ public static class Program
             var byteProgress = new Progress<DownloadProgressInfo>(
                 p => win?.SetUpdateProgress(p.DownloadedBytes, p.TotalBytes));
             await UpdateService.DownloadAssetAsync(_settings.GithubToken, release.ZipAsset,
-                UpdateService.DownloadedZipPath, byteProgress: byteProgress);
+                UpdateService.DownloadedZipPath, ct: _updateCts.Token, byteProgress: byteProgress);
             win?.HideUpdateProgress();
             win?.SetUpdateStatus("下载完成，正在准备更新…");
 
@@ -629,6 +658,14 @@ public static class Program
             AppLog.Write($"[自动更新] 已通过 {how} 拉起 Updater（目标 {release.TagName}），主程序退出交接");
             _tray.Dispose();
             _app.Shutdown();
+        }
+        catch (OperationCanceledException)
+        {
+            // v0.8.3：用户点了「取消下载」——不算失败，进度收起、按钮恢复，可直接重下
+            win?.HideUpdateProgress();
+            win?.SetUpdateStatus("已取消，可重新下载。");
+            win?.SetInstallEnabled(true);
+            AppLog.Write("[自动更新] 下载已取消（用户在设置窗点了「取消下载」），可重新下载");
         }
         catch (Exception ex)
         {

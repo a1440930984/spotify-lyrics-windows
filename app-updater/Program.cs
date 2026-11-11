@@ -68,7 +68,11 @@ public static class Program
 
         WaitForMainExit(pid);
 
-        // 逐个覆盖；单个文件被锁（杀毒扫描等）时重试 5 次、间隔 500ms
+        // 逐个覆盖；单个文件被锁（杀毒扫描等）时重试 5 次、间隔 500ms。
+        // 说明：本助手的既有逻辑本来就是对**全部文件**无条件 File.Copy(overwrite:true)，
+        // 不存在按时间戳/大小跳过的判断。
+        // v0.8.3 起再对 app.ico / app.png 显式加一道：先删目标再复制 + 复制后校验
+        // 大小一致并记日志——图标文件曾被怀疑「换版没真正覆盖」，从此有据可查。
         var files = Directory.EnumerateFiles(src, "*", SearchOption.AllDirectories).ToList();
         Log($"开始覆盖 {files.Count} 个文件 → {dst}");
         var failures = new List<string>();
@@ -79,7 +83,8 @@ public static class Program
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                CopyWithRetry(file, target);
+                if (IsIconFile(rel)) CopyIconForced(file, target, rel);
+                else CopyWithRetry(file, target);
             }
             catch (Exception ex)
             {
@@ -137,6 +142,48 @@ public static class Program
                 Thread.Sleep(500);
             }
         }
+    }
+
+    /// <summary>图标文件判定（只看文件名，与所在目录无关）。</summary>
+    private static bool IsIconFile(string rel)
+    {
+        string name = Path.GetFileName(rel);
+        return name.Equals("app.ico", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("app.png", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// v0.8.3 图标文件强制覆盖：先删目标（杜绝任何「目标已存在就不动」的余地）→
+    /// 复制 → 校验目标大小与源一致；不一致或 IO 异常重试 5 次，最终失败抛
+    /// IOException 交上层计入 failures。每次成功都记一行日志（源/目标字节数）。
+    /// </summary>
+    private static void CopyIconForced(string from, string to, string rel)
+    {
+        long srcSize = new FileInfo(from).Length;
+        Exception? lastError = null;
+        for (int attempt = 1; attempt <= 5; attempt++)
+        {
+            try
+            {
+                if (File.Exists(to)) File.Delete(to);
+                File.Copy(from, to);
+                long dstSize = new FileInfo(to).Length;
+                if (dstSize == srcSize)
+                {
+                    Log($"图标文件强制覆盖完成：{rel}（{srcSize} 字节，目标校验一致）");
+                    return;
+                }
+                lastError = new IOException($"大小不一致：源 {srcSize} 字节，目标 {dstSize} 字节");
+                Log($"图标文件覆盖后校验不一致（第 {attempt} 次）：{rel} {lastError.Message}");
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                lastError = ex;
+                Log($"图标文件覆盖失败（第 {attempt} 次）：{rel}：{ex.Message}");
+            }
+            Thread.Sleep(500);
+        }
+        throw new IOException($"图标文件 {rel} 强制覆盖 5 次仍失败：{lastError?.Message}");
     }
 
     private static void TryRelaunch(string dst, string exe)

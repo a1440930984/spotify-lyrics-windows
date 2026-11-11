@@ -1,6 +1,5 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.IO;
 using System.Windows.Forms;
 
 namespace SpotifyLyricsWin.Ui;
@@ -65,17 +64,11 @@ public sealed class Tray : IDisposable
     public void SetInstrumentalState(bool marked) =>
         _instrumentalItem.Text = marked ? "取消纯音乐标记" : "标记为纯音乐";
 
-    /// <summary>v0.2：托盘图标用 app.ico（与 exe/窗口同款）；读不到时回退运行时绘制。</summary>
-    private static Icon LoadIcon()
-    {
-        try
-        {
-            string ico = Path.Combine(AppContext.BaseDirectory, "app.ico");
-            if (File.Exists(ico)) return new Icon(ico);
-        }
-        catch { /* 回退到运行时绘制 */ }
-        return MakeIcon();
-    }
+    /// <summary>
+    /// v0.2：托盘图标用 app.ico（与 exe/窗口同款）；读不到时回退运行时绘制。
+    /// v0.8.3：改走 AppIcon 统一加载（显式取 ICO 最大帧，选帧定死），与窗口图标同源。
+    /// </summary>
+    private static Icon LoadIcon() => AppIcon.LoadDrawingIcon() ?? MakeIcon();
 
     public void SetStatus(string text)
     {

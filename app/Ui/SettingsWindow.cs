@@ -80,6 +80,8 @@ public sealed class SettingsWindow : FluentWindow
     public event Action? CheckUpdateRequested;
     /// <summary>v0.4：点「立即更新」（主程序下载、拉起 Updater 后退出本程序）。</summary>
     public event Action? InstallUpdateRequested;
+    /// <summary>v0.8.3：点「取消下载」（主程序取消正在进行的更新下载令牌）。</summary>
+    public event Action? CancelDownloadRequested;
     /// <summary>v0.6：界面主题被切换（主程序负责套调色板 + Fluent 主题并重开本窗换装）。</summary>
     public event Action? ThemeChanged;
     /// <summary>v0.6：纯音乐标记名单被清空（主程序记一行日志；标记在轮询里实时读取、无需其他动作）。</summary>
@@ -94,6 +96,9 @@ public sealed class SettingsWindow : FluentWindow
     private readonly TextBlock _updateStatus;
     // 系统 ProgressBar（WPF-UI 无自带 ProgressBar 控件，靠 ControlsDictionary 给它套 Fluent 样式）
     private readonly ProgressBar _updateProgress;
+    // v0.8.3：下载缓慢提示小字 + 「取消下载」按钮（都只在下载进行时可见）
+    private readonly TextBlock _slowDownloadHint;
+    private readonly Button _cancelDownloadBtn;
     private readonly TextBlock _releaseNotes;
     private readonly Button _installBtn;
 
@@ -533,6 +538,18 @@ public sealed class SettingsWindow : FluentWindow
             Visibility = Visibility.Collapsed
         };
         upd.Children.Add(_updateProgress);
+        // v0.8.3：下载缓慢提示（灰色小字，仅下载进行时与进度条一起出现）——
+        // GitHub 线路拥堵是国内下载慢的常态，给用户一个明确的自救出口。
+        _slowDownloadHint = new TextBlock
+        {
+            Text = "若下载长时间不动，多半是 GitHub 线路拥堵——可取消后重新下载，或到 GitHub 发布页手动下载更新包。",
+            Foreground = Theme.SubTextBrush,
+            FontSize = 11.5,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0),
+            Visibility = Visibility.Collapsed
+        };
+        upd.Children.Add(_slowDownloadHint);
         _releaseNotes = new TextBlock
         {
             Foreground = Theme.SubTextBrush,
@@ -554,8 +571,18 @@ public sealed class SettingsWindow : FluentWindow
             Appearance = ControlAppearance.Primary
         };
         _installBtn.Click += (_, _) => InstallUpdateRequested?.Invoke();
+        // v0.8.3：「取消下载」（只在下载进行时出现，由 SetUpdateProgress/HideUpdateProgress 控制）
+        _cancelDownloadBtn = new Button
+        {
+            Content = "取消下载",
+            Height = 32,
+            Width = 110,
+            Visibility = Visibility.Collapsed
+        };
+        _cancelDownloadBtn.Click += (_, _) => CancelDownloadRequested?.Invoke();
         updateBtnRow.Children.Add(checkBtn);
         updateBtnRow.Children.Add(_installBtn);
+        updateBtnRow.Children.Add(_cancelDownloadBtn);
         upd.Children.Add(updateBtnRow);
         // v0.8：开机自动启动（走 HKCU Run 注册表，见 Ui.AutoStartRegistry）
         _autoStartSwitch = AddSwitchRow(upd, "开机自动启动（登录 Windows 后自动运行）",
@@ -1031,6 +1058,9 @@ public sealed class SettingsWindow : FluentWindow
     public void SetUpdateProgress(long downloadedBytes, long totalBytes)
     {
         _updateProgress.Visibility = Visibility.Visible;
+        // v0.8.3：下载进行中才亮出慢速提示与「取消下载」
+        _slowDownloadHint.Visibility = Visibility.Visible;
+        _cancelDownloadBtn.Visibility = Visibility.Visible;
         double pct = DownloadProgressText.Percent(downloadedBytes, totalBytes);
         if (pct >= 0)
         {
@@ -1044,11 +1074,16 @@ public sealed class SettingsWindow : FluentWindow
         _updateStatus.Text = DownloadProgressText.Format(downloadedBytes, totalBytes);
     }
 
-    /// <summary>v0.8.2：下载结束（成功/失败都算）后收起进度条，状态文案由调用方接管。</summary>
+    /// <summary>
+    /// v0.8.2：下载结束（成功/失败都算）后收起进度条，状态文案由调用方接管。
+    /// v0.8.3：慢速提示与「取消下载」随进度条一并收起。
+    /// </summary>
     public void HideUpdateProgress()
     {
         _updateProgress.Visibility = Visibility.Collapsed;
         _updateProgress.IsIndeterminate = false;
+        _slowDownloadHint.Visibility = Visibility.Collapsed;
+        _cancelDownloadBtn.Visibility = Visibility.Collapsed;
     }
 
     /// <summary>有新版时：显示 Release 说明摘要（截断）与「立即更新」按钮。</summary>

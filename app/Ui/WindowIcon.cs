@@ -7,17 +7,17 @@ namespace SpotifyLyricsWin.Ui;
 /// <summary>
 /// 窗口图标加载：优先用输出目录里的 app.ico（与 exe 图标同一份），
 /// 失败则不设（回退系统默认），绝不抛异常。
+/// v0.8.3：实际加载改走 AppIcon（与托盘共用同一逻辑、显式取 ICO 最大帧拼的
+/// 单帧字节），本类只保留「套到窗口上」的薄封装。
 /// </summary>
 public static class WindowIcon
 {
-    private static BitmapImage? _cached;
-
     public static void Apply(Window window)
     {
         try
         {
-            _cached ??= Load();
-            if (_cached != null) window.Icon = _cached;
+            var img = AppIcon.LoadImageSource();
+            if (img != null) window.Icon = img;
         }
         catch { /* 图标加载失败不影响功能 */ }
     }
@@ -25,24 +25,7 @@ public static class WindowIcon
     /// <summary>标题栏小 logo 用：同一份 app.ico 的 ImageSource（加载失败返回 null）。</summary>
     public static System.Windows.Media.ImageSource? LoadImageSource()
     {
-        try
-        {
-            _cached ??= Load();
-            return _cached;
-        }
+        try { return AppIcon.LoadImageSource(); }
         catch { return null; }
-    }
-
-    private static BitmapImage? Load()
-    {
-        string ico = Path.Combine(AppContext.BaseDirectory, "app.ico");
-        if (!File.Exists(ico)) return null;
-        var bmp = new BitmapImage();
-        bmp.BeginInit();
-        bmp.UriSource = new Uri(ico);
-        bmp.CacheOption = BitmapCacheOption.OnLoad;
-        bmp.EndInit();
-        bmp.Freeze();
-        return bmp;
     }
 }
