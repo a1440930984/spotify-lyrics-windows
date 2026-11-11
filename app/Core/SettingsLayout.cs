@@ -3,10 +3,11 @@ namespace SpotifyLyricsWin.Core;
 /// <summary>
 /// 设置窗布局常量与卡序（v0.8.2 网格化，纯逻辑供无头测试断言）：
 /// 八张卡排成 **2 列 × 4 行** 的方格，同行左右等高（行高取同行较高者、卡片拉伸填满），
-/// 重要卡靠前——行序定案：
-///   行1 外观与逐字 | 译文与翻译   （天天要看的显示与译文）
-///   行2 颜色       | 字体与歌词源
-///   行3 背景与时间 | 纯音乐标记
+/// 重要卡靠前——行序定案（v0.8.6 对调：「颜色 + 背景与时间」一对提到前面，
+/// 「译文与翻译」下移到背景与时间的原位）：
+///   行1 外观与逐字 | 颜色
+///   行2 背景与时间 | 字体与歌词源
+///   行3 译文与翻译 | 纯音乐标记
 ///   行4 诊断与缓存 | 更新与启动   （低频维护类垫底）
 /// 默认尺寸 980×730（近方形，1080p 工作区能全放下）；窗口可缩放，尺寸不足时
 /// 外层 ScrollViewer 滚动兜底；窗宽 &lt; TwoColumnMinWidth 时回落单列，
@@ -39,15 +40,15 @@ public static class SettingsLayout
     /// <summary>网格行（双列模式）：自上而下四行，每行 [左卡, 右卡]。</summary>
     public static readonly string[][] GridRows =
     {
-        new[] { Look, Trans },
-        new[] { Color, Font },
-        new[] { Time, Marks },
+        new[] { Look, Color },
+        new[] { Time, Font },
+        new[] { Trans, Marks },
         new[] { Log, Update },
     };
 
     /// <summary>单列回落顺序 = 网格逐行先左后右展开。</summary>
     public static readonly string[] SingleColumn =
-        { Look, Trans, Color, Font, Time, Marks, Log, Update };
+        { Look, Color, Time, Font, Trans, Marks, Log, Update };
 
     /// <summary>给定窗口宽度是否使用双列网格（纯函数）。</summary>
     public static bool UseTwoColumns(double windowWidth) => windowWidth >= TwoColumnMinWidth;

@@ -885,7 +885,22 @@ public sealed class SettingsWindow : FluentWindow
             {
                 row.Hex = $"#FF{c.R:X2}{c.G:X2}{c.B:X2}";
             };
-            dlg.Closed += (_, _) => { if (ReferenceEquals(_picker, dlg)) _picker = null; };
+            dlg.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_picker, dlg)) _picker = null;
+                // v0.8.6：颜色盘是被「点设置页内」失活关掉的 → 关窗流程会把
+                // 激活顺手让给别的窗口，设置页就掉到后面去了（Sun 实测）。
+                // 等关闭彻底完成（BeginInvoke 延后一拍）把激活/前景还给设置页。
+                // 点的是别的程序时 ClosedOverOwner=false，什么都不做——
+                // 用户主动切走，绝不能把他拽回来。
+                if (dlg.ClosedOverOwner)
+                {
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try { Activate(); } catch { /* 窗已在关，忽略 */ }
+                    }));
+                }
+            };
             dlg.Show();
         }
         catch (Exception ex)

@@ -98,6 +98,21 @@ public sealed class GradientLyricLine : FrameworkElement
         }
     }
 
+    /// <summary>
+    /// v0.8.6 整窗可拖配套：命中范围放宽到**整个行盒矩形**。
+    /// 本控件是 OnRender 自绘，默认命中只认实际画出的字形范围——鼠标落在
+    /// 字形上下/左右的空白（行盒高 1.45 倍字号，空白不少）就命不中，于是
+    /// 悬浮窗的悬停/拖动在那些位置失效（Sun 实测：必须正压在字上才能拖）。
+    /// 这里直接对行盒全矩形返回命中，行内处处可拖/可悬停。
+    /// </summary>
+    protected override HitTestResult HitTestCore(PointHitTestParameters hitTestParameters)
+    {
+        var rect = new Rect(0, 0, ActualWidth, ActualHeight);
+        return rect.Contains(hitTestParameters.HitPoint)
+            ? new PointHitTestResult(this, hitTestParameters.HitPoint)
+            : null!;
+    }
+
     private Typeface Typeface => new(new FontFamily(_fontFamily),
         FontStyles.Normal, _fontWeight, FontStretches.Normal);
 

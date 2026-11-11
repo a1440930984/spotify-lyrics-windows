@@ -88,6 +88,33 @@ public static class IcoFrames
         return result;
     }
 
+    /// <summary>
+    /// 把一份 PNG 图像数据包成只含单帧的合法 ICO（v0.8.6，纯逻辑、无头可测）。
+    /// 用途：托盘专用图是运行时渲染出来的 PNG，需要变成 Icon 才能喂给
+    /// NotifyIcon——手写 ICO 容器（头 + 单目录项 + PNG 原样搬运）比走
+    /// GetHicon 的句柄路线干净（无句柄所有权问题）。宽高 ≥256 时目录项
+    /// 字节按规范写 0。PNG 为空/尺寸非法返回 null。
+    /// </summary>
+    public static byte[]? WrapPngAsIco(byte[] png, int width, int height)
+    {
+        if (png.Length == 0 || width <= 0 || height <= 0 || width > 256 || height > 256)
+            return null;
+        var result = new byte[6 + 16 + png.Length];
+        BitConverter.GetBytes((ushort)0).CopyTo(result, 0);          // 保留
+        BitConverter.GetBytes((ushort)1).CopyTo(result, 2);          // 类型 1 = 图标
+        BitConverter.GetBytes((ushort)1).CopyTo(result, 4);          // 帧数 1
+        result[6] = width >= 256 ? (byte)0 : (byte)width;            // 宽（256 写 0）
+        result[7] = height >= 256 ? (byte)0 : (byte)height;          // 高
+        result[8] = 0;                                                // 色数（0 = ≥256 色）
+        result[9] = 0;                                                // 保留
+        BitConverter.GetBytes((ushort)1).CopyTo(result, 10);         // 平面数
+        BitConverter.GetBytes((ushort)32).CopyTo(result, 12);        // 位深 32（PNG 带 alpha）
+        BitConverter.GetBytes(png.Length).CopyTo(result, 14);        // 图像字节数
+        BitConverter.GetBytes(6 + 16).CopyTo(result, 18);            // 图像偏移
+        Array.Copy(png, 0, result, 6 + 16, png.Length);
+        return result;
+    }
+
     /// <summary>帧尺寸列表（日志/诊断用）：方形帧只写边长（如 16,20,256），非方形写 WxH。</summary>
     public static string FrameListText(IReadOnlyList<IcoFrame> frames)
         => string.Join(",", frames.Select(f => f.Width == f.Height ? $"{f.Width}" : $"{f.Width}x{f.Height}"));

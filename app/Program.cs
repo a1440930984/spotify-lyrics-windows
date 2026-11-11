@@ -1,5 +1,7 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using SpotifyLyricsWin.Core;
@@ -89,7 +91,10 @@ public static class Program
         AppIcon.ReportToLog();
 
         // v0.4：先看上次自动更新的结果（Updater 写的 update-result.json），汇报一次后删掉
+        // v0.8.6：留个标记——本次启动是不是「更新刚跑完、被更新器拉起来的那次」，
+        // 决定启动自动打开的设置页要不要置前（见 Main 末尾的自动打开分支）。
         var lastResult = UpdateService.ReadResult();
+        bool justUpdated = lastResult != null;
         if (lastResult != null)
         {
             _startupUpdateNote = lastResult.Ok
@@ -195,7 +200,10 @@ public static class Program
         if (_settings.OpenSettingsOnStartup)
         {
             AppLog.Write("[启动] 「启动时打开设置页」=开，自动打开设置页（居中）");
-            OpenSettingsCore(centered: true);
+            // v0.8.6：只有「更新刚完成、被更新器拉起」这一次置前——用户刚点完
+            // 更新、正等着看结果，窗口不该被别的程序压住；普通启动的自动
+            // 打开不置前（每天开机弹到最前面反而打扰）。
+            OpenSettingsCore(centered: true, bringToFront: justUpdated);
         }
         else
         {
@@ -579,12 +587,38 @@ public static class Program
     /// <summary>手动打开入口（托盘/悬浮窗/气泡/主题换装重开）：走设置窗的位置记忆。</summary>
     private static void OpenSettings() => OpenSettingsCore(centered: false);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    /// <summary>
+    /// v0.8.6：把刚打开的设置窗拉到最前。Activate 之外再加一记**置顶脉冲**
+    /// （Topmost 开→关：窗口被抬进置顶层再放回普通层，放回时留在普通层
+    /// 最上面，不会留下常驻置顶的副作用）与 SetForegroundWindow 兜底——
+    /// 更新后的进程是被更新器拉起的、不在前台链上，单靠 Activate 常常
+    /// 抢不到前景。只在更新后那一次自动打开时用（见调用处）。
+    /// </summary>
+    private static void BringSettingsToFront(SettingsWindow window)
+    {
+        try
+        {
+            window.Activate();
+            window.Topmost = true;
+            window.Topmost = false;
+            window.Activate();
+            var hwnd = new WindowInteropHelper(window).Handle;
+            if (hwnd != IntPtr.Zero) SetForegroundWindow(hwnd);
+            AppLog.Write("[自动更新] 更新后自动打开的设置页已置前");
+        }
+        catch { /* 置前失败不影响打开本身，最坏不过是用户自己点一下 */ }
+    }
+
     /// <summary>
     /// 打开设置窗的统一入口（v0.8.2）：centered=true 只给程序自动打开的两条路径
     /// （启动时自动打开、更新完成重启后随之而来的那次）——居中展示且不污染位置记忆；
     /// 手动打开传 false。已开着则只激活，不重复造窗。
+    /// v0.8.6：bringToFront=true 仅给「更新完成、重启后自动打开」这一次（见 Main）。
     /// </summary>
-    private static void OpenSettingsCore(bool centered)
+    private static void OpenSettingsCore(bool centered, bool bringToFront = false)
     {
         if (_settingsWindow != null) { _settingsWindow.Activate(); return; }
         try { _settingsWindow = new SettingsWindow(_settings, centered); }
@@ -630,6 +664,8 @@ public static class Program
             _settingsWindow.SetUpdateStatus(_startupUpdateNote + $" 当前版本 v{UpdateService.CurrentVersion}。");
         }
         _settingsWindow.Show();
+        // v0.8.6：更新后那一次自动打开，Show 完立刻置前（其余路径不置前）
+        if (bringToFront) BringSettingsToFront(_settingsWindow);
     }
 
     /// <summary>v0.4：统一处理更新检查结果（静默/手动共用）。</summary>

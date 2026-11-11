@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -18,8 +19,9 @@ namespace SpotifyLyricsWin.Ui;
 /// v0.7 按钮带重做：改 Overlay 绝对层（悬浮窗顶部居中固定锚点，**不占布局高度**，
 /// 单/双行、长短句位置恒定——v0.6 把带放进布局行，双行时会被歌词顶上去）；
 /// 显隐改纯悬停语义：鼠标进歌词区才淡入（120ms）、离开立即淡出（80ms 后收起），
-/// 不再有 3 秒定时与高度动画。锁定状态下悬停也不显示（鼠标本就为拖动/穿透让路，
-/// 解锁走右击菜单/托盘的「锁定位置」）。
+/// 不再有 3 秒定时与高度动画。（v0.8.6 更正：锁定状态下悬停**也**显示——
+/// 否则锁定后按钮带永远唤不回、解锁只能绕菜单；且命中放宽到整窗矩形，
+/// 不再只有压住字形才算悬停。详见构造里 v0.8.6 注释。）
 /// v0.7 译文行换成渐变行控件：与当前行共用行进度做整行比例扫光（按译文字数取整到字粒度，
 /// 近似逐字）；译文字号改比例跟随（Core.LayoutMath.TranslationFontSize）。
 /// v0.7 背景与主题彻底解耦：Window.Background 恒为透明（ApplyStyle 每次重申），
@@ -115,7 +117,13 @@ public sealed class FloatingWindow : Window
         // v0.8.5：窗口句柄一就绪就把合成层背景重申为透明（见类头定案）；
         // 此后每次 ApplyStyle 与每次主题应用之后（Program 侧）都会再重申，
         // 专门擦掉库在 RemoveBackdrop 路径里涂上的系统窗口色。
-        SourceInitialized += (_, _) => EnsureTransparentComposition();
+        // v0.8.6：同一时机给窗口打工具窗样式，让它退出 Alt+Tab / 任务视图
+        // 列表（见 ApplyToolWindowStyle）。
+        SourceInitialized += (_, _) =>
+        {
+            ApplyToolWindowStyle();
+            EnsureTransparentComposition();
+        };
 
         // v0.8 背景「雾面」定因（实锤）：歌词文字此前挂了**双重阴影**——GradientLyricLine
         // 的 OnRender 内部已按字形手绘一遍偏移阴影，外面又给每行套了一个 DropShadowEffect。
@@ -146,10 +154,19 @@ public sealed class FloatingWindow : Window
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 7, 0, 0),
-            Opacity = 0.6
+            Opacity = 0.6,
+            // v0.8.6：整窗可拖——TextBlock 默认只在字形上命中，垫一层可命中
+            // 的透明背景让整块行盒都算数（见下方容器链注释）
+            Background = Brushes.Transparent
         };
 
-        var stack = new StackPanel();
+        // v0.8.6 整窗可拖/可悬停（Sun 定案）：命中必须覆盖**整个内容矩形**，
+        // 包括双行之间的缝隙、行间留白与顶部留白带——此前只有正压在字形上
+        // 才拖得动、才出按钮带。做法是给容器链每一层都垫 **Transparent 画刷**
+        // （WPF 里非 null 的画刷才参与命中；像素仍全透明、看不见，与 v0.8.5
+        // 透明定案不冲突——根 Border 的画刷仍由 ApplyStyle 按背景透明度管，
+        // 这里各层的 Transparent 同理只是「可命中」标记，绝不用 null）。
+        var stack = new StackPanel { Background = Brushes.Transparent };
         stack.Children.Add(_currentLine);
         stack.Children.Add(_translationLine);
         stack.Children.Add(_nextBlock);
@@ -218,7 +235,7 @@ public sealed class FloatingWindow : Window
         // 这样「带底边（32）≤ 第一行顶边（36）」由构造保证，双行/大字号也不会再压字
         // （v0.7 带直接锚在歌词块顶部，胶囊正好压住第一行字形上沿，Sun 截图实锤）。
         // 留白是纯透明区，不算背景——窗口透明度=0 时它什么都不画。
-        var grid = new Grid();
+        var grid = new Grid { Background = Brushes.Transparent };   // v0.8.6：整层可命中（同上）
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(LayoutMath.BandReserveTop) });
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         Grid.SetRow(stack, 1);
@@ -231,6 +248,10 @@ public sealed class FloatingWindow : Window
         {
             Padding = new Thickness(6),
             CornerRadius = new CornerRadius(16),
+            // v0.8.6：构造期先垫 Transparent 保证整域可命中；之后每次
+            // ApplyStyle 按「背景透明度」重刷（0 时仍是 Transparent、>0 时
+            // 半透明黑——两种都是非 null 画刷，命中范围始终是全域）。
+            Background = Brushes.Transparent,
             Child = grid
         };
         Content = _rootBorder;
@@ -301,8 +322,11 @@ public sealed class FloatingWindow : Window
         MouseLeftButtonDown += OnMouseDown;
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnMouseUp;
-        // v0.7 悬停显隐：进歌词区淡入、离开立即淡出；锁定状态不显示（解锁走右击菜单/托盘）。
-        MouseEnter += (_, _) => { if (!_settings.PositionLocked) ShowBand(); };
+        // 悬停显隐：进歌词区淡入、离开立即淡出。v0.8.6 起**锁定状态也显示**
+        // （Sun 定案）——否则锁定后按钮带永远唤不出来，想解锁只能绕右击菜单/
+        // 托盘；现在悬停即可露出锁定钮当场解锁。锁定禁拖的老规则不变
+        // （OnMouseDown 里照旧按 PositionLocked 拦截）。
+        MouseEnter += (_, _) => ShowBand();
         MouseLeave += (_, _) => HideBand();
         MouseDoubleClick += (_, _) => SettingsRequested?.Invoke();
 
@@ -329,8 +353,10 @@ public sealed class FloatingWindow : Window
         _settings.PositionLocked = !_settings.PositionLocked;
         _settings.RequestSave();
         UpdateLockButton();
-        // 刚锁定：按钮带按新规则立刻收起（锁定后悬停也不显示）；刚解锁：保持显示方便确认
-        if (_settings.PositionLocked) HideBand(); else ShowBand();
+        // v0.8.6：锁定/解锁都保持按钮带显示——刚点完锁钮鼠标还悬在窗内，
+        // 让用户当场看清新状态（🔒/🔓 已切换）；鼠标离开时 MouseLeave 照常收起，
+        // 再次悬停（锁定态也一样）会重新唤出，不再有「锁定后带就消失了」。
+        ShowBand();
     }
 
     private void UpdateLockButton()
@@ -412,6 +438,41 @@ public sealed class FloatingWindow : Window
             return o is Color c ? c : fallback;
         }
         catch { return fallback; }
+    }
+
+    // ---------- Alt+Tab / 任务视图隐藏（v0.8.6） ----------
+
+    private const int GWL_EXSTYLE = -20;
+    private const long WS_EX_TOOLWINDOW = 0x00000080L;
+    private const long WS_EX_APPWINDOW = 0x00040000L;
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    /// <summary>
+    /// v0.8.6：给悬浮窗打上工具窗扩展样式（WS_EX_TOOLWINDOW，并清掉
+    /// WS_EX_APPWINDOW）。歌词窗无 Owner、又是顶层窗，此前会混进 Alt+Tab
+    /// 与任务视图的窗口列表占一格（Sun 截图实锤）——桌面挂件不该在那儿。
+    /// 工具窗样式是系统给浮窗/工具条的官方豁免：不进 Alt+Tab、不进任务
+    /// 视图；叠加既有的 ShowInTaskbar=false，任务栏同样不出现。托盘是
+    /// 独立的 NotifyIcon，不受影响；Topmost、拖动、单实例、合成层透明
+    /// 都不读这个样式位，无冲突。时机选 SourceInitialized：句柄已就绪、
+    /// 窗口尚未显示，设完即生效，不用再补 SWP_FRAMECHANGED。
+    /// </summary>
+    private void ApplyToolWindowStyle()
+    {
+        try
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero) return;
+            long ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+            long updated = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+            if (updated != ex) SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(updated));
+        }
+        catch { /* 失败不影响歌词功能，最坏不过是仍留在切换列表里 */ }
     }
 
     /// <summary>

@@ -1,4 +1,6 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Windows.Forms;
 using System.Windows.Media;
@@ -86,6 +88,57 @@ public static class AppIcon
     {
         try { return SystemInformation.SmallIconSize.Width; }
         catch { return 0; }
+    }
+
+    private static Icon? _cachedTrayIcon;
+
+    /// <summary>
+    /// 托盘**专用**图标（v0.8.6）：托盘格尺寸是系统定死的，想让它看着大
+    /// 一点只能让图本身更满幅——取 app.ico 的最大帧（256），按
+    /// TrayIconSizing.FullBleedZoom 放大居中重绘到托盘尺寸（绿圆占幅
+    /// 约 92%→99%、音符随之变大），PNG 再包成单帧 ICO 构造 Icon。
+    /// 与主图标的差异只有这一处取景：app.ico/app.png 本体不动，
+    /// 任务栏/标题栏仍走 LoadDrawingIcon / LoadImageSource 的原图。
+    /// 任一步失败返回 null，调用方回退 LoadDrawingIcon。
+    /// </summary>
+    public static Icon? LoadTrayIcon()
+    {
+        EnsureLoaded();
+        if (_icoBytes == null) return null;
+        if (_cachedTrayIcon != null) return _cachedTrayIcon;
+        try
+        {
+            var frames = IcoFrames.Parse(_icoBytes);
+            if (IcoFrames.Largest(frames) is not { } largest) return null;
+            byte[]? single = IcoFrames.ExtractLargestFrameIco(_icoBytes);
+            if (single == null) return null;
+
+            using var srcIconStream = new MemoryStream(single);
+            using var srcIcon = new Icon(srcIconStream, largest.Width, largest.Height);
+            using var src = srcIcon.ToBitmap();
+
+            int size = TrayIconSizing.Normalize(SmallIconPixelSize());
+            var (offset, draw) = TrayIconSizing.ZoomRect(size, TrayIconSizing.FullBleedZoom);
+            using var bmp = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.CompositingQuality = CompositingQuality.HighQuality;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.SmoothingMode = SmoothingMode.HighQuality;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.Clear(System.Drawing.Color.Transparent);
+                g.DrawImage(src, (float)offset, (float)offset, (float)draw, (float)draw);
+            }
+            using var pngStream = new MemoryStream();
+            bmp.Save(pngStream, ImageFormat.Png);
+            byte[]? ico = IcoFrames.WrapPngAsIco(pngStream.ToArray(), size, size);
+            if (ico == null) return null;
+            using var icoStream = new MemoryStream(ico);
+            _cachedTrayIcon = new Icon(icoStream);
+            return _cachedTrayIcon;
+        }
+        catch { return null; }
     }
 
     /// <summary>

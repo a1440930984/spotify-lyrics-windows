@@ -68,8 +68,10 @@ public sealed class Tray : IDisposable
     /// v0.2：托盘图标用 app.ico（与 exe/窗口同款）；读不到时回退运行时绘制。
     /// v0.8.3 起改走 AppIcon 统一加载、与窗口图标同源；v0.8.4 起 AppIcon 给的
     /// 是 app.ico 原始多帧（系统按显示面选帧），不再是 v0.8.3 的单帧 256。
+    /// v0.8.6：优先用托盘专用图（LoadTrayIcon：最大帧放大满幅重绘版，
+    /// 在系统定死的小格里看着大一点）；它失败才回退原图、再失败回退绘制。
     /// </summary>
-    private static Icon LoadIcon() => AppIcon.LoadDrawingIcon() ?? MakeIcon();
+    private static Icon LoadIcon() => AppIcon.LoadTrayIcon() ?? AppIcon.LoadDrawingIcon() ?? MakeIcon();
 
     public void SetStatus(string text)
     {

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -182,12 +183,39 @@ public sealed class ColorPickerWindow : ThemedWindow
         _live = true;
     }
 
+    /// <summary>
+    /// v0.8.6：本次失活关闭发生时，鼠标是否落在所有者（设置页）范围内。
+    /// 设置页据此决定关窗后要不要把激活/前景抢回来（见 SettingsWindow 的
+    /// Closed 处理）：点设置页内关掉的要还，点到别的程序关掉的不许抢。
+    /// </summary>
+    public bool ClosedOverOwner { get; private set; }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+
+    private struct POINT { public int X; public int Y; }
+
     /// <summary>失活自动关闭：选色已实时生效，关窗即确认，不需要确认按钮。</summary>
     private void OnDeactivatedAutoClose(object? sender, EventArgs e)
     {
         if (_shownAt == DateTime.MinValue) return;
         if ((DateTime.UtcNow - _shownAt).TotalMilliseconds < 250) return;
+        // v0.8.6：关之前记下这一下点在哪儿——失活正是由那次点击引起的，
+        // 此刻光标位置就是点击位置；落在所有者矩形内 = 用户点的是设置页。
+        ClosedOverOwner = IsCursorOverOwner();
         try { Close(); } catch { /* 已在关闭流程中 */ }
+    }
+
+    private bool IsCursorOverOwner()
+    {
+        try
+        {
+            if (Owner == null || !GetCursorPos(out var pt)) return false;
+            var local = Owner.PointFromScreen(new Point(pt.X, pt.Y));
+            return local.X >= 0 && local.Y >= 0
+                && local.X <= Owner.ActualWidth && local.Y <= Owner.ActualHeight;
+        }
+        catch { return false; }
     }
 
     private Color CurrentColor => HsvToRgb(_h, _s, _v);
