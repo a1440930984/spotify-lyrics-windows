@@ -115,7 +115,7 @@ public sealed class GradientLyricLine : FrameworkElement
     protected override Size MeasureOverride(Size availableSize)
     {
         double w = double.IsInfinity(availableSize.Width) ? 880 : availableSize.Width;
-        if (_text.Length == 0) return new Size(w, _desiredFontSize * 1.45);
+        if (_text.Length == 0) return new Size(w, Core.LayoutMath.LineBoxHeight(_desiredFontSize));
         _fittedSize = FitFontSize(w);
         var ft = BuildWrapped(w, _fittedSize);
         _cachedText = ft;
@@ -145,7 +145,8 @@ public sealed class GradientLyricLine : FrameworkElement
         if (w <= 0 || _text.Length == 0) return;
         var ft = (_cachedText != null && Math.Abs(_cachedWidth - w) < 0.5)
             ? _cachedText : BuildWrapped(w, _fittedSize);
-        double y = Math.Max(0, (h - ft.Height) / 2);
+        // 垂直居中：原点公式与 Core.LayoutMath 共用一份（v0.3 单行双居中靠它保证）
+        double y = Core.LayoutMath.CenterOffset(h, ft.Height);
 
         // 阴影：同文本以 #E6000000 在 (0,1) 偏移处先画一遍（规格：dx0 dy1 radius4，WPF 侧用 Effect 亦可，这里用偏移画法更可控）
         var shadow = BuildWrapped(w, _fittedSize);
@@ -174,7 +175,7 @@ public sealed class GradientLyricLine : FrameworkElement
             // 逐字进度先按比例折算到实际排版宽度上：
             double textWidth = ft.Width;
             if (_singleLineWidth > 0) x = x / _singleLineWidth * textWidth;
-            double startX = Math.Max(0, (w - textWidth) / 2.0);
+            double startX = Core.LayoutMath.CenteredTextX(w, textWidth);
             double absX = startX + x;
 
             double edge = 16.0;

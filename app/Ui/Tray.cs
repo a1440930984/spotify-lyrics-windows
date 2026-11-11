@@ -14,6 +14,7 @@ public sealed class Tray : IDisposable
     public event Action? OpenSettings;
     public event Action? ManualPick;
     public event Action? RefetchLyrics;
+    public event Action? OpenLog;
     public event Action? ExitApp;
 
     public Tray()
@@ -21,7 +22,7 @@ public sealed class Tray : IDisposable
         _icon = new NotifyIcon
         {
             Icon = LoadIcon(),
-            Text = "SpotifyLyrics 悬浮歌词 v0.2",
+            Text = "SpotifyLyrics 悬浮歌词 v0.3",
             Visible = true
         };
         var menu = new ContextMenuStrip();
@@ -29,6 +30,7 @@ public sealed class Tray : IDisposable
         menu.Items.Add("设置…", null, (_, _) => OpenSettings?.Invoke());
         menu.Items.Add("手动选词…", null, (_, _) => ManualPick?.Invoke());
         menu.Items.Add("重新搜词", null, (_, _) => RefetchLyrics?.Invoke());
+        menu.Items.Add("打开日志", null, (_, _) => OpenLog?.Invoke());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => ExitApp?.Invoke());
         _icon.ContextMenuStrip = menu;

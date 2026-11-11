@@ -70,6 +70,8 @@ public sealed class SmtcTracker
                 DurationMs = durationMs,
                 ProgressMs = posMs,
                 IsPlaying = isPlaying,
+                // v0.3：封面图有无是广告识别的组合信号（广告常无封面）；读不到引用即按无封面
+                HasCover = props.Thumbnail != null,
                 UpdatedAtMs = now
             };
         }

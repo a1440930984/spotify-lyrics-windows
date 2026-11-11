@@ -7,23 +7,33 @@ using System.Windows.Shapes;
 namespace SpotifyLyricsWin.Ui;
 
 /// <summary>
-/// 自包含 WPF HSV 颜色盘（v0.2，修 v0.1「颜色盘打不开」——v0.1 根本没有颜色盘对话框）。
-/// 照复刻规格：SV 二维板 + 色相条 + 预览块 + hex 输入 + 12 预设色，四处同步
-/// （_syncing 防回环）；颜色强制 alpha=FF。不依赖 WinForms ColorDialog。
-/// 用法：构造时传入初始色，ShowDialog() 后从 PickedColor 取结果（null = 取消）。
+/// HSV 颜色盘（v0.3 交互重做，继承 ThemedWindow 自绘深色主题）：
+/// - 标题就叫「选择颜色」（子窗口不带程序名/版本号，照用户要求）；
+/// - 打开时居中于所有者窗口（Owner + CenterOwner），标题栏只有关闭键；
+/// - **没有确认/取消按钮**：选色全程实时回调 ColorChanged 应用到悬浮窗，
+///   关窗即保留当前色——所以「关窗 = 确认」；
+/// - **失活自动关闭**：点到窗外（别的窗口/桌面）就关，逻辑同上（已实时生效，不会丢）。
+///   窗内点 hex 输入框、拖色板都只是窗内焦点变化，不触发 Deactivated，不会误关；
+///   刚打开 250ms 内的失活忽略（防打开手势的尾巴误触）。
+/// SV 二维板 + 色相条 + 预览块 + hex 输入 + 12 预设色四处同步（_syncing 防回环），
+/// 颜色强制 alpha=FF。不依赖 WinForms ColorDialog。
 /// </summary>
-public sealed class ColorPickerWindow : Window
+public sealed class ColorPickerWindow : ThemedWindow
 {
-    public Color? PickedColor { get; private set; }
+    /// <summary>选色实时变化（拖动/预设/hex 都会发）。订阅方据此即时应用。</summary>
+    public event Action<Color>? ColorChanged;
 
     private double _h;          // 0..360
     private double _s = 1;      // 0..1
     private double _v = 1;      // 0..1
     private bool _syncing;
+    private bool _live;                       // 构造完成前不发 ColorChanged
+    private DateTime _shownAt = DateTime.MinValue;
 
     private readonly Canvas _svCanvas;
     private readonly Rectangle _svBase;
     private readonly Ellipse _svMarker;
+    private readonly Ellipse _svMarkerRing;
     private readonly Canvas _hueCanvas;
     private readonly Rectangle _hueMarker;
     private readonly Border _preview;
@@ -38,15 +48,14 @@ public sealed class ColorPickerWindow : Window
 
     private const double SvW = 264, SvH = 176, HueH = 22;
 
-    public ColorPickerWindow(Color initial)
+    public ColorPickerWindow(Color initial) : base("选择颜色", showMinimize: false)
     {
-        Title = "颜色盘 · SpotifyLyrics v0.2";
         Width = 330;
         SizeToContent = SizeToContent.Height;
-        ResizeMode = ResizeMode.CanMinimize;
-        ShowInTaskbar = true;
-        WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        WindowIcon.Apply(this);
+        ResizeMode = ResizeMode.NoResize;
+        WindowStartupLocation = WindowStartupLocation.CenterOwner;   // 居中于所有者窗口
+        Deactivated += OnDeactivatedAutoClose;
+        Activated += (_, _) => { if (_shownAt == DateTime.MinValue) _shownAt = DateTime.UtcNow; };
 
         (_h, _s, _v) = RgbToHsv(initial);
 
@@ -56,7 +65,7 @@ public sealed class ColorPickerWindow : Window
         _preview = new Border
         {
             Width = 42, Height = 42, CornerRadius = new CornerRadius(10),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x44, 0, 0, 0)),
+            BorderBrush = Theme.BorderBrush,
             BorderThickness = new Thickness(1.5)
         };
         _hexBox = new TextBox
@@ -71,8 +80,10 @@ public sealed class ColorPickerWindow : Window
         panel.Children.Add(topRow);
         panel.Children.Add(new TextBlock
         {
-            Text = "拖动色板选深浅，拖动色条选颜色；也可以直接填 hex。",
-            FontSize = 11, Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 0)
+            Text = "拖动色板选深浅，拖动色条选颜色；选色实时生效，点到窗外自动关闭并保留。",
+            FontSize = 11, Foreground = Theme.SubTextBrush,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 8, 0, 0)
         });
 
         // ---- SV 二维板：底色(纯色相) × 白→透明(横) × 透明→黑(纵) ----
@@ -87,17 +98,17 @@ public sealed class ColorPickerWindow : Window
             Width = SvW, Height = SvH,
             Fill = new LinearGradientBrush(Colors.Transparent, Colors.Black, 90)
         };
+        _svMarkerRing = new Ellipse
+        {
+            Width = 18, Height = 18,
+            Stroke = new SolidColorBrush(Color.FromArgb(0xCC, 0, 0, 0)),
+            StrokeThickness = 1, Fill = Brushes.Transparent, IsHitTestVisible = false
+        };
         _svMarker = new Ellipse
         {
             Width = 16, Height = 16,
             Stroke = Brushes.White, StrokeThickness = 2,
             Fill = Brushes.Transparent, IsHitTestVisible = false
-        };
-        var markerShadow = new Ellipse
-        {
-            Width = 18, Height = 18,
-            Stroke = new SolidColorBrush(Color.FromArgb(0xCC, 0, 0, 0)),
-            StrokeThickness = 1, Fill = Brushes.Transparent, IsHitTestVisible = false
         };
         _svCanvas = new Canvas
         {
@@ -107,13 +118,11 @@ public sealed class ColorPickerWindow : Window
         _svCanvas.Children.Add(_svBase);
         _svCanvas.Children.Add(whiteGrad);
         _svCanvas.Children.Add(blackGrad);
-        _svCanvas.Children.Add(markerShadow);
+        _svCanvas.Children.Add(_svMarkerRing);
         _svCanvas.Children.Add(_svMarker);
         _svCanvas.MouseLeftButtonDown += (s, e) => { _dragSv = true; _svCanvas.CaptureMouse(); SvFromPoint(e); };
         _svCanvas.MouseMove += (s, e) => { if (_dragSv) SvFromPoint(e); };
         _svCanvas.MouseLeftButtonUp += (_, _) => { _dragSv = false; _svCanvas.ReleaseMouseCapture(); };
-        // marker 的两个圈同步移动：用 Tag 关联太绕，直接在 Refresh 里一起定位（见下 _svMarker2）
-        _svMarker2 = markerShadow;
         panel.Children.Add(_svCanvas);
 
         // ---- 色相条 ----
@@ -144,7 +153,7 @@ public sealed class ColorPickerWindow : Window
         // ---- 12 预设色 ----
         panel.Children.Add(new TextBlock
         {
-            Text = "常用颜色", FontSize = 11, Foreground = Brushes.Gray,
+            Text = "常用颜色", FontSize = 11, Foreground = Theme.SubTextBrush,
             Margin = new Thickness(0, 10, 0, 4)
         });
         var presets = new WrapPanel();
@@ -155,7 +164,7 @@ public sealed class ColorPickerWindow : Window
             {
                 Width = 38, Height = 30, Margin = new Thickness(0, 0, 6, 6),
                 Background = new SolidColorBrush(c),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(0x44, 0, 0, 0)),
+                BorderBrush = Theme.BorderBrush,
                 Tag = c
             };
             btn.Click += (_, _) => SetColor((Color)btn.Tag, fromHex: false);
@@ -163,19 +172,18 @@ public sealed class ColorPickerWindow : Window
         }
         panel.Children.Add(presets);
 
-        // ---- 按钮 ----
-        var ok = new Button { Content = "使用这个颜色", Height = 32, Margin = new Thickness(0, 10, 0, 0) };
-        ok.Click += (_, _) => { PickedColor = CurrentColor; DialogResult = true; Close(); };
-        panel.Children.Add(ok);
-        var cancel = new Button { Content = "取消", Height = 28, Margin = new Thickness(0, 6, 0, 0) };
-        cancel.Click += (_, _) => { DialogResult = false; Close(); };
-        panel.Children.Add(cancel);
-
-        Content = panel;
+        SetBody(panel);
         Refresh(pushHex: true);
+        _live = true;
     }
 
-    private readonly Ellipse _svMarker2;
+    /// <summary>失活自动关闭：选色已实时生效，关窗即确认，不需要确认按钮。</summary>
+    private void OnDeactivatedAutoClose(object? sender, EventArgs e)
+    {
+        if (_shownAt == DateTime.MinValue) return;
+        if ((DateTime.UtcNow - _shownAt).TotalMilliseconds < 250) return;
+        try { Close(); } catch { /* 已在关闭流程中 */ }
+    }
 
     private Color CurrentColor => HsvToRgb(_h, _s, _v);
 
@@ -201,11 +209,9 @@ public sealed class ColorPickerWindow : Window
         if (!Core.Settings.IsValidHex(text)) return;
         string h = text.TrimStart('#').ToUpperInvariant();
         if (h.Length == 6) h = "FF" + h;
-        byte a = Convert.ToByte(h.Substring(0, 2), 16);
         byte r = Convert.ToByte(h.Substring(2, 2), 16);
         byte g = Convert.ToByte(h.Substring(4, 2), 16);
         byte b = Convert.ToByte(h.Substring(6, 2), 16);
-        _ = a; // alpha 强制 FF，仅解析校验
         SetColor(Color.FromRgb(r, g, b), fromHex: true);
     }
 
@@ -223,8 +229,8 @@ public sealed class ColorPickerWindow : Window
         double mx = _s * SvW, my = (1 - _v) * SvH;
         Canvas.SetLeft(_svMarker, mx - 8);
         Canvas.SetTop(_svMarker, my - 8);
-        Canvas.SetLeft(_svMarker2, mx - 9);
-        Canvas.SetTop(_svMarker2, my - 9);
+        Canvas.SetLeft(_svMarkerRing, mx - 9);
+        Canvas.SetTop(_svMarkerRing, my - 9);
         Canvas.SetLeft(_hueMarker, _h / 360.0 * SvW - 2);
         Canvas.SetTop(_hueMarker, 0);
         if (pushHex)
@@ -233,6 +239,7 @@ public sealed class ColorPickerWindow : Window
             _hexBox.Text = $"#FF{c.R:X2}{c.G:X2}{c.B:X2}";
             _syncing = false;
         }
+        if (_live) ColorChanged?.Invoke(c);
     }
 
     // ---------- HSV <-> RGB ----------

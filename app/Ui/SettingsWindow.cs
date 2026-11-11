@@ -7,12 +7,14 @@ using SpotifyLyricsWin.Core;
 namespace SpotifyLyricsWin.Ui;
 
 /// <summary>
-/// 设置窗（v0.2 改版）：**所有改动实时生效**——控件一变就写 Settings、通知主程序
-/// 重套悬浮窗样式，并防抖落盘；不再有「保存」动作，窗口不自动关闭（「完成」仅关窗）。
+/// 设置窗（v0.3 改版）：继承 ThemedWindow 自绘深色主题，标题「Spotify 歌词 · 设置 v0.3」。
+/// - **所有改动实时生效**：控件一变就写 Settings、通知主程序重套悬浮窗样式、防抖落盘；
+/// - v0.3 移除「完成」按钮：实时生效+自动存盘下它没有功能意义，关窗走标题栏 ✕；
+/// - 新增「打开日志」：诊断日志路径直接写在窗内（广告识别调规则靠它）。
 /// 条目照复刻规格：逐字开关、字号 12~36、背景 0~100、高亮/文字色（hex + 色块 + 颜色盘 + 12 预设）、
-/// 偏移 ±100ms（±30s 钳制）；新增：字体、显示行数（单/双行）、锁定位置、Musixmatch Key。
+/// 偏移 ±100ms（±30s 钳制）；新增项：字体、显示行数（单/双行）、锁定位置、Musixmatch Key。
 /// </summary>
-public sealed class SettingsWindow : Window
+public sealed class SettingsWindow : ThemedWindow
 {
     private readonly Settings _settings;
     private readonly CheckBox _wordByWord;
@@ -20,9 +22,9 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _lockCheck;
     private readonly RadioButton _doubleLine;
     private readonly RadioButton _singleLine;
-    private readonly Slider _fontSlider;
+    private readonly MiniSlider _fontSlider;
     private readonly TextBlock _fontValue;
-    private readonly Slider _bgSlider;
+    private readonly MiniSlider _bgSlider;
     private readonly TextBlock _bgValue;
     private readonly ColorRow _hiRow;
     private readonly ColorRow _textRow;
@@ -33,6 +35,8 @@ public sealed class SettingsWindow : Window
 
     /// <summary>任意设置变化（主程序据此重套悬浮窗样式；持久化走 Settings.RequestSave 防抖）。</summary>
     public event Action? LiveChanged;
+    /// <summary>点「打开日志」（主程序负责用记事本打开 log.txt）。</summary>
+    public event Action? OpenLogRequested;
 
     private static readonly string[] Presets = ColorPickerWindow.Presets;
 
@@ -52,22 +56,18 @@ public sealed class SettingsWindow : Window
         }
     }
 
-    public SettingsWindow(Settings settings)
+    public SettingsWindow(Settings settings) : base("Spotify 歌词 · 设置 v0.3", showMinimize: true)
     {
         _settings = settings;
-        Title = "SpotifyLyrics 设置 · v0.2";
-        Width = 440;
-        SizeToContent = SizeToContent.Height;
-        WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        ResizeMode = ResizeMode.CanMinimize;   // v0.2：普通窗口，带最小化+关闭
-        ShowInTaskbar = true;
-        WindowIcon.Apply(this);
+        Width = 460;
+        Height = 680;
+        ResizeMode = ResizeMode.CanMinimize;
 
-        var panel = new StackPanel { Margin = new Thickness(16) };
+        var panel = new StackPanel { Margin = new Thickness(16, 12, 16, 16) };
 
         panel.Children.Add(new TextBlock
         {
-            Text = "逐字与外观（改动实时生效，无需保存）",
+            Text = "逐字与外观（改动实时生效，自动保存）",
             FontSize = 15,
             FontWeight = FontWeights.Bold,
             Margin = new Thickness(0, 0, 0, 8)
@@ -86,7 +86,7 @@ public sealed class SettingsWindow : Window
         _lockCheck.Unchecked += (_, _) => OnChanged(() => _settings.PositionLocked = false);
         panel.Children.Add(_lockCheck);
 
-        // 显示行数（v0.2 新增）
+        // 显示行数（单行 = 当前行水平+垂直双居中；双行 = 当前行 + 下一行）
         panel.Children.Add(new TextBlock { Text = "显示行数", FontWeight = FontWeights.Bold });
         var lineRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 8) };
         _doubleLine = new RadioButton { Content = "双行（当前行 + 下一行）", Margin = new Thickness(0, 0, 16, 0), GroupName = "lines" };
@@ -98,13 +98,13 @@ public sealed class SettingsWindow : Window
         panel.Children.Add(lineRow);
 
         // 字号 12~36
-        _fontValue = new TextBlock();
+        _fontValue = new TextBlock { Foreground = Theme.SubTextBrush };
         panel.Children.Add(new TextBlock { Text = "歌词字号（12 ~ 36，长句会自动缩小）", FontWeight = FontWeights.Bold });
-        _fontSlider = new Slider { Minimum = 12, Maximum = 36, TickFrequency = 1, IsSnapToTickEnabled = true };
-        _fontSlider.ValueChanged += (_, _) =>
+        _fontSlider = new MiniSlider { Minimum = 12, Maximum = 36 };
+        _fontSlider.ValueChanged += v =>
         {
-            _fontValue.Text = $"当前：{(int)_fontSlider.Value}";
-            OnChanged(() => _settings.FontSize = (int)_fontSlider.Value);
+            _fontValue.Text = $"当前：{(int)v}";
+            OnChanged(() => _settings.FontSize = (int)v);
         };
         panel.Children.Add(_fontSlider);
         panel.Children.Add(_fontValue);
@@ -116,18 +116,18 @@ public sealed class SettingsWindow : Window
             () => _settings.TextColorHex, v => _settings.TextColorHex = v);
 
         // 背景透明度 0~100
-        _bgValue = new TextBlock();
+        _bgValue = new TextBlock { Foreground = Theme.SubTextBrush };
         panel.Children.Add(new TextBlock
         {
             Text = "背景框透明度（0 ~ 100，0 = 只显示文字无背景框，推荐）",
             FontWeight = FontWeights.Bold,
             Margin = new Thickness(0, 10, 0, 0)
         });
-        _bgSlider = new Slider { Minimum = 0, Maximum = 100, TickFrequency = 1, IsSnapToTickEnabled = true };
-        _bgSlider.ValueChanged += (_, _) =>
+        _bgSlider = new MiniSlider { Minimum = 0, Maximum = 100 };
+        _bgSlider.ValueChanged += v =>
         {
-            _bgValue.Text = $"当前：{(int)_bgSlider.Value}";
-            OnChanged(() => _settings.BgAlphaPercent = (int)_bgSlider.Value);
+            _bgValue.Text = $"当前：{(int)v}";
+            OnChanged(() => _settings.BgAlphaPercent = (int)v);
         };
         panel.Children.Add(_bgSlider);
         panel.Children.Add(_bgValue);
@@ -140,9 +140,9 @@ public sealed class SettingsWindow : Window
             Margin = new Thickness(0, 10, 0, 0)
         });
         var offsetRow = new StackPanel { Orientation = Orientation.Horizontal };
-        var minus = new Button { Content = "− 0.1s", Width = 70, Margin = new Thickness(0, 4, 6, 0) };
-        var plus = new Button { Content = "+ 0.1s", Width = 70, Margin = new Thickness(0, 4, 6, 0) };
-        _offsetValue = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
+        var minus = new Button { Content = "− 0.1s", Width = 74, Margin = new Thickness(0, 4, 6, 0) };
+        var plus = new Button { Content = "+ 0.1s", Width = 74, Margin = new Thickness(0, 4, 6, 0) };
+        _offsetValue = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Foreground = Theme.SubTextBrush };
         minus.Click += (_, _) => OnChanged(() =>
             _settings.LyricsOffsetMs = Math.Clamp(_settings.LyricsOffsetMs - 100, -30000, 30000), RefreshOffset);
         plus.Click += (_, _) => OnChanged(() =>
@@ -180,11 +180,27 @@ public sealed class SettingsWindow : Window
         _mxmKey.TextChanged += (_, _) => OnChanged(() => _settings.MusixmatchApiKey = _mxmKey.Text.Trim());
         panel.Children.Add(_mxmKey);
 
-        // 按钮区：完成（仅关窗）/ 恢复默认（实时生效）
-        var done = new Button { Content = "完成", Height = 34, Margin = new Thickness(0, 16, 0, 0) };
-        done.Click += (_, _) => Close();
-        panel.Children.Add(done);
-        var reset = new Button { Content = "恢复默认外观（纯文字 + 绿色平滑逐字）", Height = 30, Margin = new Thickness(0, 8, 0, 0) };
+        // 诊断日志（v0.3）：广告没识别出来时，把广告时段的日志行发回来调规则
+        panel.Children.Add(new TextBlock
+        {
+            Text = "诊断日志（广告识别/播放状态都记在这里）",
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 14, 0, 0)
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = AppLog.LogPath,
+            Foreground = Theme.SubTextBrush,
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 2, 0, 0)
+        });
+        var logBtn = new Button { Content = "打开日志", Height = 30, Margin = new Thickness(0, 6, 0, 0) };
+        logBtn.Click += (_, _) => OpenLogRequested?.Invoke();
+        panel.Children.Add(logBtn);
+
+        // 恢复默认（实时生效）。v0.3 起没有「完成」按钮——关窗请用标题栏 ✕。
+        var reset = new Button { Content = "恢复默认外观（纯文字 + 绿色平滑逐字）", Height = 30, Margin = new Thickness(0, 10, 0, 0) };
         reset.Click += (_, _) =>
         {
             _loading = true;
@@ -196,7 +212,12 @@ public sealed class SettingsWindow : Window
         };
         panel.Children.Add(reset);
 
-        Content = panel;
+        SetBody(new ScrollViewer
+        {
+            Content = panel,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        });
         LoadIntoControls();
         _loading = false;
     }
@@ -228,7 +249,7 @@ public sealed class SettingsWindow : Window
                 Width = 42,
                 Height = 42,
                 CornerRadius = new CornerRadius(10),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(0x44, 0, 0, 0)),
+                BorderBrush = Theme.BorderBrush,
                 BorderThickness = new Thickness(1.5),
                 Margin = new Thickness(0, 0, 8, 0),
                 Cursor = Cursors.Hand,
@@ -237,11 +258,10 @@ public sealed class SettingsWindow : Window
         };
         var pick = new Button
         {
-            Content = "颜色盘…", Height = 30, Margin = new Thickness(8, 0, 0, 0),
+            Content = "颜色盘…", Height = 32, Margin = new Thickness(8, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center
         };
         pick.Click += (_, _) => OpenColorPicker(row, get, set);
-        // v0.2 修复：色块预览也可点开颜色盘（v0.1 的 Border 无任何点击处理，点了没反应）
         row.Swatch.MouseLeftButtonUp += (_, _) => OpenColorPicker(row, get, set);
 
         var hexRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
@@ -267,7 +287,7 @@ public sealed class SettingsWindow : Window
                 Height = 26,
                 Margin = new Thickness(0, 0, 5, 5),
                 Background = new SolidColorBrush(c),
-                BorderBrush = new SolidColorBrush(Color.FromArgb(0x44, 0, 0, 0)),
+                BorderBrush = Theme.BorderBrush,
                 Tag = p
             };
             btn.Click += (_, _) => row.Hex = (string)btn.Tag;
@@ -277,24 +297,34 @@ public sealed class SettingsWindow : Window
         return row;
     }
 
+    private ColorPickerWindow? _picker;
+
     /// <summary>
-    /// 打开 HSV 颜色盘；任何异常都兜底提示（不许点了一点反应没有）。
-    /// 兜底路径：提示用下方 12 个预设色或直接填 hex——它们一直在设置窗里可用。
+    /// 打开 HSV 颜色盘（v0.3 交互）：居中于本窗、选色实时回调生效、失活自动关（关窗即确认）。
+    /// 非模态打开，重复点只激活已开的那个。任何异常都兜底提示；
+    /// 兜底路径是下方 12 个预设色或直接填 hex，一直可用。
     /// </summary>
     private void OpenColorPicker(ColorRow row, Func<string> get, Action<string> set)
     {
         try
         {
+            if (_picker != null) { _picker.Activate(); return; }
             var initial = FloatingWindow.ParseHex(get(), Colors.White);
             var dlg = new ColorPickerWindow(initial) { Owner = this };
-            if (dlg.ShowDialog() == true && dlg.PickedColor is Color picked)
-                row.Hex = $"#FF{picked.R:X2}{picked.G:X2}{picked.B:X2}";
+            _picker = dlg;
+            dlg.ColorChanged += c =>
+            {
+                row.Hex = $"#FF{c.R:X2}{c.G:X2}{c.B:X2}";
+            };
+            dlg.Closed += (_, _) => { if (ReferenceEquals(_picker, dlg)) _picker = null; };
+            dlg.Show();
         }
         catch (Exception ex)
         {
+            _picker = null;
             MessageBox.Show(this,
                 $"颜色盘打开失败（{ex.Message}）。\n可以直接点下方 12 个预设色块，或在输入框填 #AARRGGBB，效果一样实时生效。",
-                "颜色盘", MessageBoxButton.OK, MessageBoxImage.Warning);
+                "选择颜色", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 

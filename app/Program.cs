@@ -29,11 +29,17 @@ public static class Program
     private static ManualLyricsWindow? _manualWindow;
     private static bool _isAd;
     private static string _adKey = "";
+    private static string _lastLogSignature = "\0";
 
     [STAThread]
     public static void Main()
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+
+        // v0.3：启动先落一行日志，保证 log.txt 必然存在（v0.2 只在广告命中时写，
+        // 从未命中就没文件，用户找不到）。路径：%AppData%/SpotifyLyricsWin/log.txt
+        AppLog.EnsureFile();
+        AppLog.Write("[启动] SpotifyLyricsWin v0.3 启动");
 
         _settings = Settings.Load();
         _tracker = new SmtcTracker();
@@ -71,6 +77,7 @@ public static class Program
             var t = _tracker.Current;
             if (t != null && !_isAd) StartFetch(t, skipCache: true);
         };
+        _tray.OpenLog += OpenLogFile;
         _tray.ExitApp += () =>
         {
             _tray.Dispose();
@@ -83,6 +90,7 @@ public static class Program
         {
             await _tracker.PollAsync();
             var track = _tracker.Current;
+            LogSmtcState(track);
             if (track == null)
             {
                 _loadedKey = "";
@@ -133,8 +141,51 @@ public static class Program
         _settingsWindow = new SettingsWindow(_settings);
         // v0.2：设置实时生效——每次变更立刻重套悬浮窗样式（落盘由设置窗内的防抖处理）
         _settingsWindow.LiveChanged += () => _floating.ApplyStyle();
+        _settingsWindow.OpenLogRequested += OpenLogFile;
         _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow.Show();
+    }
+
+    /// <summary>用记事本打开诊断日志（文件必然存在：启动时已 EnsureFile）。</summary>
+    private static void OpenLogFile()
+    {
+        try
+        {
+            AppLog.EnsureFile();
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "notepad.exe",
+                Arguments = $"\"{AppLog.LogPath}\"",
+                UseShellExecute = true
+            });
+        }
+        catch { /* 打开失败不崩溃 */ }
+    }
+
+    /// <summary>
+    /// v0.3 全量诊断日志：SMTC 状态签名（曲目/专辑/时长/封面/播放态/判定）一变就记一行，
+    /// 不再只记广告命中。广告没识别出来时，用户把这几行发回来就能看清 SMTC 到底给了什么。
+    /// </summary>
+    private static void LogSmtcState(TrackInfo? track)
+    {
+        string signature, line;
+        if (track == null)
+        {
+            signature = "<none>";
+            line = "[SMTC] 无曲目（会话消失或未在播放） 判定=未定";
+        }
+        else
+        {
+            var v = AdDetector.Check(track);
+            signature = $"{track.Key}|{track.Album}|{track.DurationMs}|{track.HasCover}|{track.IsPlaying}|{v.IsAd}";
+            line = $"[SMTC] 标题=「{track.Title}」 歌手=「{track.Artist}」 专辑=「{track.Album}」 " +
+                   $"时长={(track.DurationMs > 0 ? (track.DurationMs / 1000) + "s" : "未知")} " +
+                   $"封面={(track.HasCover ? "有" : "无")} 状态={(track.IsPlaying ? "播放" : "暂停")} " +
+                   $"判定={(v.IsAd ? $"广告（{v.Rule}）" : "歌曲")}";
+        }
+        if (signature == _lastLogSignature) return;
+        _lastLogSignature = signature;
+        AppLog.Write(line);
     }
 
     private static void OpenManualPicker()
@@ -188,6 +239,9 @@ public static class Program
                     _engine.Lyrics = outcome.Lyrics;
                     _loadedKey = key;
                     _tray.SetStatus($"SpotifyLyrics - 歌词：{outcome.SourceName}｜{track.Title}");
+                    AppLog.Write($"[取词] 「{track.Title}」 命中 {outcome.SourceName}" +
+                        (outcome.Score >= 0 ? $" 打分={outcome.Score} 候选=「{outcome.CandidateTitle}」" : "（顺序回退）") +
+                        $" 逐字={outcome.Lyrics.IsWordLevel} 行数={outcome.Lyrics.Lines.Count}");
                 }
                 else
                 {
@@ -195,6 +249,7 @@ public static class Program
                     _loadedKey = key; // 记住已试过，避免每 500ms 重试拖死接口；手动「重新搜词」可再来
                     _notFound = true;
                     _tray.SetStatus($"SpotifyLyrics - 未找到歌词：{track.Title}");
+                    AppLog.Write($"[取词] 「{track.Title}」 所有源均未命中（可手动选词）");
                 }
             });
         }, ct);

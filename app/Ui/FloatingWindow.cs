@@ -16,6 +16,9 @@ namespace SpotifyLyricsWin.Ui;
 /// 长句缩字号、切行上滑淡入、停播淡出 0.38、拖动阈值 8 保存位置、轻点显按钮 3 秒。
 /// v0.2 新增：锁定位置按钮（挨着关闭键）、右击菜单、单/双行模式、
 /// 窗口宽度按内容自适应（居中以当前行文本为准，修 v0.1 单行不居中）。
+/// v0.3：按钮组不再覆盖歌词——显形时窗口向上扩出一条 30px 按钮带
+/// （Top 同步上移，歌词区位置像素不动）；单/双行切换时保持窗口垂直中心稳定，
+/// 单行模式当前行水平+垂直双居中（行高/居中公式见 Core.LayoutMath）。
 /// </summary>
 public sealed class FloatingWindow : Window
 {
@@ -28,6 +31,12 @@ public sealed class FloatingWindow : Window
     private readonly Button _lockButton;
     private readonly MenuItem _lockMenuItem;
     private readonly DispatcherTimer _hideButtonsTimer;
+    private readonly RowDefinition _bandRow;
+
+    private const double BandHeight = 30;
+    private bool _bandShown;
+    private double _lastHeight = -1;
+    private bool _suppressCenterKeep;
 
     private string _lastCurrent = "\0";
     private bool _dimmed;
@@ -90,17 +99,17 @@ public sealed class FloatingWindow : Window
         stack.Children.Add(_translationBlock);
         stack.Children.Add(_nextBlock);
 
-        // ---- 右上按钮组：锁定 + 关闭（默认隐藏，轻点/悬停显形 3 秒，照安卓关闭键逻辑） ----
+        // ---- 按钮组：锁定 + 关闭（v0.3 移到独立按钮带，不再压在歌词上） ----
         _lockButton = new Button
         {
             Width = 30,
-            Height = 30,
+            Height = 26,
             Opacity = 0.85,
             Visibility = Visibility.Collapsed,
             Background = Brushes.Transparent,
             Foreground = Brushes.White,
             BorderThickness = new Thickness(0),
-            FontSize = 13,
+            FontSize = 12,
             Cursor = Cursors.Hand,
             Margin = new Thickness(0, 0, 4, 0),
             ToolTip = "锁定/解锁位置",
@@ -111,13 +120,13 @@ public sealed class FloatingWindow : Window
         {
             Content = "✕",
             Width = 30,
-            Height = 30,
+            Height = 26,
             Opacity = 0.85,
             Visibility = Visibility.Collapsed,
             Background = Brushes.Transparent,
             Foreground = Brushes.White,
             BorderThickness = new Thickness(0),
-            FontSize = 13,
+            FontSize = 12,
             Cursor = Cursors.Hand,
             ToolTip = "隐藏歌词"
         };
@@ -132,9 +141,15 @@ public sealed class FloatingWindow : Window
         buttons.Children.Add(_lockButton);
         buttons.Children.Add(_closeButton);
 
+        // 两行布局：第 0 行按钮带（默认高 0，显形时扩到 30）、第 1 行歌词区
+        _bandRow = new RowDefinition { Height = new GridLength(0) };
         var grid = new Grid();
-        grid.Children.Add(stack);
+        grid.RowDefinitions.Add(_bandRow);
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetRow(buttons, 0);
+        Grid.SetRow(stack, 1);
         grid.Children.Add(buttons);
+        grid.Children.Add(stack);
 
         _rootBorder = new Border
         {
@@ -144,22 +159,22 @@ public sealed class FloatingWindow : Window
         };
         Content = _rootBorder;
 
-        // ---- 右击菜单（v0.2） ----
-        var menu = new ContextMenu();
-        var miSettings = new MenuItem { Header = "打开设置…" };
+        // ---- 右击菜单（v0.2；v0.3 套深色样式与三窗统一） ----
+        var menu = new ContextMenu { Style = Theme.ContextMenuStyle() };
+        var miSettings = new MenuItem { Header = "打开设置…", Style = Theme.MenuItemStyle() };
         miSettings.Click += (_, _) => SettingsRequested?.Invoke();
-        var miPick = new MenuItem { Header = "手动选词…" };
+        var miPick = new MenuItem { Header = "手动选词…", Style = Theme.MenuItemStyle() };
         miPick.Click += (_, _) => ManualPickRequested?.Invoke();
-        var miRefetch = new MenuItem { Header = "重新搜词" };
+        var miRefetch = new MenuItem { Header = "重新搜词", Style = Theme.MenuItemStyle() };
         miRefetch.Click += (_, _) => RefetchRequested?.Invoke();
-        _lockMenuItem = new MenuItem { Header = "锁定位置", IsCheckable = true };
+        _lockMenuItem = new MenuItem { Header = "锁定位置", IsCheckable = true, Style = Theme.MenuItemStyle() };
         _lockMenuItem.Click += (_, _) =>
         {
             _settings.PositionLocked = _lockMenuItem.IsChecked;
             _settings.RequestSave();
             UpdateLockButton();
         };
-        var miHide = new MenuItem { Header = "隐藏歌词" };
+        var miHide = new MenuItem { Header = "隐藏歌词", Style = Theme.MenuItemStyle() };
         miHide.Click += (_, _) => CloseRequested?.Invoke();
         menu.Items.Add(miSettings);
         menu.Items.Add(miPick);
@@ -173,9 +188,26 @@ public sealed class FloatingWindow : Window
         _hideButtonsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         _hideButtonsTimer.Tick += (_, _) =>
         {
-            _closeButton.Visibility = Visibility.Collapsed;
-            _lockButton.Visibility = Visibility.Collapsed;
+            SetBand(false);
             _hideButtonsTimer.Stop();
+        };
+
+        // 内容高度变化（单/双行切换、字号变化）时保持窗口垂直中心不动，
+        // 用户感知的歌词位置不跳。按钮带的上扩/收回自己做全量 Top 补偿，走 _suppressCenterKeep 豁免。
+        SizeChanged += (_, e) =>
+        {
+            if (_suppressCenterKeep)
+            {
+                _suppressCenterKeep = false;
+                _lastHeight = e.NewSize.Height;
+                return;
+            }
+            if (_lastHeight > 0 && !_dragging &&
+                Math.Abs(e.NewSize.Height - _lastHeight) > 0.5 && !double.IsNaN(Top))
+            {
+                Top += (_lastHeight - e.NewSize.Height) / 2.0;
+            }
+            _lastHeight = e.NewSize.Height;
         };
 
         MouseLeftButtonDown += OnMouseDown;
@@ -217,10 +249,28 @@ public sealed class FloatingWindow : Window
 
     private void RevealButtons()
     {
-        _closeButton.Visibility = Visibility.Visible;
-        _lockButton.Visibility = Visibility.Visible;
+        SetBand(true);
         _hideButtonsTimer.Stop();
         _hideButtonsTimer.Start();
+    }
+
+    /// <summary>
+    /// 按钮带显/隐（v0.3）：扩高 BandHeight 的同时 Top 反向移动同等距离，
+    /// 歌词区在屏幕上的位置像素级不动，按钮永远不会盖住歌词；
+    /// 收回时反向操作。拖动判定不含按钮本身（见 IsOnButton），带内空白区仍可拖。
+    /// </summary>
+    private void SetBand(bool show)
+    {
+        if (_bandShown == show) return;
+        _bandShown = show;
+        double delta = show ? BandHeight : -BandHeight;
+        _suppressCenterKeep = true;
+        _bandRow.Height = new GridLength(show ? BandHeight : 0);
+        var vis = show ? Visibility.Visible : Visibility.Collapsed;
+        _closeButton.Visibility = vis;
+        _lockButton.Visibility = vis;
+        if (!double.IsNaN(Top) && IsLoaded) Top -= delta;
+        else _suppressCenterKeep = false;
     }
 
     // ---------- 样式 ----------

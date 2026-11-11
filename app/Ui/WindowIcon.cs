@@ -22,6 +22,17 @@ public static class WindowIcon
         catch { /* 图标加载失败不影响功能 */ }
     }
 
+    /// <summary>标题栏小 logo 用：同一份 app.ico 的 ImageSource（加载失败返回 null）。</summary>
+    public static System.Windows.Media.ImageSource? LoadImageSource()
+    {
+        try
+        {
+            _cached ??= Load();
+            return _cached;
+        }
+        catch { return null; }
+    }
+
     private static BitmapImage? Load()
     {
         string ico = Path.Combine(AppContext.BaseDirectory, "app.ico");

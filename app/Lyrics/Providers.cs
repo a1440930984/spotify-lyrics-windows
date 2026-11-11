@@ -264,16 +264,17 @@ CancellationToken ct)
 var result = new CandidateSearchResult();
 var seen = new HashSet<string>();
 bool anyResponse = false;
-void Add(string song, string singer, long durMs, string id, string accesskey)
+bool Add(string song, string singer, long durMs, string id, string accesskey)
 {
-if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(accesskey)) return;
+if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(accesskey)) return false;
 string key = $"{id}|{accesskey}";
-if (!seen.Add(key)) return;
+if (!seen.Add(key)) return false;
 result.Candidates.Add(new LyricCandidate
 {
 ProviderName = Name, Title = song, Artist = singer,
 DurationMs = durMs, WordLevel = true, Key = key
 });
+return true;
 }
 
 var combos = LyricsService.BuildCombos(title, artist);
@@ -299,23 +300,25 @@ HttpHelp.Str(cand, "id"), HttpHelp.Str(cand, "accesskey"));
 }
 }
 
-// 路线 A 兜底：mobilecdn 拿 hash → krcs 换 id/accesskey（部分网络下路线 B 返回空）
-if (result.Candidates.Count == 0)
-{
+// 路线 A 补跑（v0.3 改）：mobilecdn 拿真歌曲 hash → krcs 换 id/accesskey。
+// 路线 B 的候选是「歌词文件」索引，混着半截 KRC 与 DJ 版（时长=片段长），
+// 打分会被时长差误杀；路线 A 按歌曲哈希核验，给出的是全曲 KRC，必须并进来一起打分。
+// 上限：最多补 3 个哈希核验候选，控住耗时（打分阶段总预算 6 秒）。
+int addedFromA = 0;
 foreach (string kw in combos.Take(2))
 {
-if (result.Candidates.Count >= 8) break;
+if (addedFromA >= 3) break;
 string? json = await HttpHelp.GetStringAsync(
 $"http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword={HttpHelp.Enc(kw)}&page=1&pagesize=8", ct);
 var root = HttpHelp.ParseJson(json);
 if (root is not JsonElement r) continue;
 anyResponse = true;
-if (!r.TryGetProperty("data", out var data) ||!data.TryGetProperty("info", out var info) ||
-info.ValueKind!= JsonValueKind.Array) continue;
+if (!r.TryGetProperty("data", out var data) || !data.TryGetProperty("info", out var info) ||
+info.ValueKind != JsonValueKind.Array) continue;
 int resolved = 0;
 foreach (var item in info.EnumerateArray())
 {
-if (resolved >= 5 || result.Candidates.Count >= 8) break;
+if (resolved >= 3 || addedFromA >= 3) break;
 string hash = HttpHelp.Str(item, "hash");
 if (hash.Length == 0) continue;
 resolved++;
@@ -333,12 +336,13 @@ cc.ValueKind == JsonValueKind.Array)
 foreach (var cand in cc.EnumerateArray())
 {
 long durRaw = HttpHelp.Num(cand, "duration");
-long durMs = durRaw > 0? durRaw: durSec * 1000;
-Add(HttpHelp.Str(cand, "song") is { Length: > 0 } s? s: song,
-HttpHelp.Str(cand, "singer") is { Length: > 0 } s2? s2: singer,
-durMs, HttpHelp.Str(cand, "id"), HttpHelp.Str(cand, "accesskey"));
+// 与路线 B 同口径：小于 1000 按秒、其余按毫秒；缺失时用歌曲时长兜底
+long durMs = durRaw <= 0 ? durSec * 1000 : durRaw < 1000 ? durRaw * 1000 : durRaw;
+if (Add(HttpHelp.Str(cand, "song") is { Length: > 0 } s ? s : song,
+HttpHelp.Str(cand, "singer") is { Length: > 0 } s2 ? s2 : singer,
+durMs, HttpHelp.Str(cand, "id"), HttpHelp.Str(cand, "accesskey")))
+addedFromA++;
 break;
-}
 }
 }
 }
@@ -685,7 +689,7 @@ FetchLyricByRidAsync(candidate.Key, ct);
 public sealed class LrclibProvider: ILyricsProvider, ICandidateProvider
 {
 public string Name => "LRCLIB";
-private const string Ua = "SpotifyLyricsWin/0.2 (personal lyrics overlay)";
+private const string Ua = "SpotifyLyricsWin/0.3 (personal lyrics overlay)";
 
 public async Task<ProviderResult?> FetchAsync(string title, string artist, long durationMs,
 IReadOnlyList<string> combos, CancellationToken ct)

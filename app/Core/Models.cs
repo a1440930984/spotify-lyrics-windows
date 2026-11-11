@@ -15,6 +15,11 @@ public sealed class TrackInfo
     public long DurationMs { get; init; }
     public long ProgressMs { get; init; }
     public bool IsPlaying { get; init; }
+    /// <summary>
+    /// SMTC 是否给了封面图（v0.3 广告识别信号）。默认 true=按「有封面」处理：
+    /// 未知时宁可不判广告（保守）；SmtcTracker 会按实际元数据覆盖此值。
+    /// </summary>
+    public bool HasCover { get; init; } = true;
     /// <summary>记录 ProgressMs 时的 Stopwatch 毫秒时间戳</summary>
     public long UpdatedAtMs { get; init; } = NowMs();
 
@@ -78,17 +83,22 @@ public sealed class Lyrics
 }
 
 /// <summary>
-/// 常用繁→简映射（安卓版用 ChineseConverter，这里收录高频字，够歌名/歌手去重用）。
+/// 繁→简转换（对应安卓版 ChineseConverter.toSimplified）。
+/// v0.3 起用完整单字映射表（SimplifierData，3510 对，源自 MediaWiki 繁简对照），
+/// 不再是 v0.2 的百余字高频表——歌名/歌手的繁体字基本都能转。
+/// 应用点：曲目 Key、搜索关键词、候选匹配归一化、手动选词预填显示。
 /// </summary>
 public static class Simplifier
 {
     private static readonly Dictionary<char, char> Map = Build();
 
+    /// <summary>映射表条数（供测试/诊断）。</summary>
+    public static int MapCount => Map.Count;
+
     private static Dictionary<char, char> Build()
     {
-        const string pairs =
-            "愛爱樂乐國国華华龍龙鳳凤雲云風风雨點点們们這这裡里麼么麼么時时還还過过來来去們们說说聽听見见開开關关門门問问間间陽阳陰阴難难離离夢梦聲声歌詞词曲線线長长髮发現现實实個个為为麼么將将從从當当對对會会學学書书畫画東东車车馬马鳥鸟魚鱼語语讀读寫写發发頭头買买賣卖開开關关們们這这個个來来時时說说國国會会過过還还進进遠远運运邊边這这連连達达麼么選选這这遞递適适裡里釋释鑑鉴鍵键鏈链銷销鎖锁鐵铁鑄铸鐘钟錦锦錫锡錯错鍋锅鋼钢錢钱鍵键鑽钻鑲镶鏡镜閃闪閉闭問问闖闯階阶陰阴陣阵陳陈陸陆陽阳隸隶雜杂難难霧雾靈灵頁页頂顶項项順顺預预領领頻频題题額额風风飛飞飯饭飲饮館馆馬马驗验驚惊體体魚鱼鳥鸟鴿鸽鳳凤黃黄點点黨党齊齐齒齿龍龙龜龟龔龚";
-        var d = new Dictionary<char, char>();
+        string pairs = SimplifierData.Pairs;
+        var d = new Dictionary<char, char>(pairs.Length / 2);
         for (int i = 0; i + 1 < pairs.Length; i += 2) d[pairs[i]] = pairs[i + 1];
         return d;
     }
