@@ -1,5 +1,7 @@
 using System.Drawing;
 using System.IO;
+using System.Windows.Forms;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpotifyLyricsWin.Core;
 
@@ -11,15 +13,20 @@ namespace SpotifyLyricsWin.Ui;
 /// 指纹/帧列表（v0.8.3 起保留）——装机 app.ico 若不是预期的那份（更新器没
 /// 覆盖成功等），日志一眼可见。
 ///
-/// 选帧策略（v0.8.4 改回多帧）：v0.8.3 曾把 app.ico 抽成「只含 256 最大帧」
-/// 的单帧字节，想把选帧定死；真机反馈大小对了但**失真**——托盘/任务栏只有
-/// 十几到几十像素，大图硬缩必然发糊。本版改回 v0.7 时代的原始机制：托盘与
-/// 窗口图标一律吃 app.ico 的**原始多帧字节**（new Icon(stream) 保留全部帧，
-/// 由系统按每个显示面需要的尺寸自己选帧）；唯一例外是 WPF 标题栏的
-/// ImageSource——那是位图缩放链，给 BitmapImage 设 DecodePixelWidth 为
-/// 标题栏显示档（约 20 DIP × DPI 缩放，见 Core.IconSizing），让解码器
-/// 按档挑帧解码，不再拿 256 帧硬缩。读不到文件/解析失败返回 null，
-/// 调用方走原有回退（托盘回退运行时绘制，窗口回退不设图标）。
+/// 选帧策略沿革：v0.8.3 曾把 app.ico 抽成「只含 256 最大帧」的单帧字节，
+/// 真机反馈大小对了但**失真**（大图硬缩发糊）；v0.8.4 改回原始多帧字节，
+/// 但 WPF 侧仍走 BitmapImage——它只解一帧（实测拿到偏小帧），任务栏图标
+/// 约以 16px 帧呈现、明显小于 v0.7 时代。v0.8.5 定案：两侧都显式走
+/// 「多帧 + 按尺寸选帧」——
+/// · WPF 侧（窗口图标/标题栏 logo）：用 BitmapFrame.Create 吃整份 ICO 流，
+///   解出的帧集合留在解码器里，由 WPF 成像管线按每个显示面的渲染尺寸
+///   自己选最接近的一帧（BitmapImage 路径只作回退，回退时仍按
+///   Core.IconSizing 设 DecodePixelWidth）。
+/// · 托盘侧：构造 Icon 时传**系统小图标尺寸**（SM_CXSMICON，已含 DPI
+///   缩放，经 Core.TrayIconSizing 归一化），让 GDI 选最接近帧——既不拿
+///   小帧被迫放大、也不拿 256 大帧硬缩。
+/// 读不到文件/解析失败返回 null，调用方走原有回退（托盘回退运行时绘制，
+/// 窗口回退不设图标）。
 /// </summary>
 public static class AppIcon
 {
@@ -28,7 +35,7 @@ public static class AppIcon
     private static string _source = "运行时绘制";
     private static string _md5Prefix = "-";
     private static string _frameList = "-";
-    private static BitmapImage? _cachedImage;
+    private static ImageSource? _cachedImage;
 
     private static void EnsureLoaded()
     {
@@ -57,7 +64,8 @@ public static class AppIcon
     }
 
     /// <summary>
-    /// 托盘/窗口用：从原始多帧字节构造 Icon（保留全部帧，系统按显示面选帧）；
+    /// 托盘用：从原始多帧字节构造 Icon，构造尺寸传系统小图标尺寸
+    /// （SM_CXSMICON，已含 DPI 缩放），让 GDI 选最接近的一帧；
     /// 不可用返回 null（调用方回退运行时绘制）。
     /// </summary>
     public static Icon? LoadDrawingIcon()
@@ -66,21 +74,40 @@ public static class AppIcon
         if (_icoBytes == null) return null;
         try
         {
+            int size = TrayIconSizing.Normalize(SmallIconPixelSize());
             using var ms = new MemoryStream(_icoBytes);
-            return new Icon(ms);
+            return new Icon(ms, size, size);
         }
         catch { return null; }
     }
 
+    /// <summary>系统小图标边长（设备像素，已含 DPI 缩放）；取不到返回 0，由 TrayIconSizing 回退。</summary>
+    private static int SmallIconPixelSize()
+    {
+        try { return SystemInformation.SmallIconSize.Width; }
+        catch { return 0; }
+    }
+
     /// <summary>
-    /// 标题栏小 logo 用：原始多帧字节解出的 ImageSource，按标题栏显示档设
-    /// DecodePixelWidth（见类注释）；缓存+冻结，全窗共用。
+    /// 窗口图标/标题栏小 logo 用：整份 ICO 流经 BitmapFrame.Create 多帧解码，
+    /// 成像管线按渲染尺寸选帧；缓存+冻结，全窗共用。解码失败回退
+    /// BitmapImage 路径（单帧，但按标题栏显示档设 DecodePixelWidth）。
     /// </summary>
-    public static BitmapImage? LoadImageSource()
+    public static ImageSource? LoadImageSource()
     {
         EnsureLoaded();
         if (_icoBytes == null) return null;
         if (_cachedImage != null) return _cachedImage;
+        try
+        {
+            using var ms = new MemoryStream(_icoBytes);
+            var frame = BitmapFrame.Create(
+                ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+            frame.Freeze();
+            _cachedImage = frame;
+            return frame;
+        }
+        catch { /* 回退 BitmapImage 路径 */ }
         try
         {
             var bmp = new BitmapImage();

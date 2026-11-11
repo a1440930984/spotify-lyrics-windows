@@ -8,8 +8,9 @@ namespace SpotifyLyricsWin.Ui;
 /// 窗口图标加载：优先用输出目录里的 app.ico（与 exe 图标同一份），
 /// 失败则不设（回退系统默认），绝不抛异常。
 /// v0.8.3：实际加载改走 AppIcon（与托盘共用同一逻辑），本类只保留
-/// 「套到窗口上」的薄封装。v0.8.4：AppIcon 已改回原始多帧策略
-/// （窗口图标系统选帧、标题栏 ImageSource 按显示档 DecodePixelWidth）。
+/// 「套到窗口上」的薄封装。v0.8.5：AppIcon 的 WPF 侧改走 BitmapFrame
+/// 多帧解码（成像管线按渲染尺寸选帧），BitmapImage+DecodePixelWidth
+/// 只作解码失败时的回退。
 /// </summary>
 public static class WindowIcon
 {

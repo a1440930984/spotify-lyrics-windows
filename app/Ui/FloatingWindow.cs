@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using SpotifyLyricsWin.Core;
@@ -34,6 +35,19 @@ namespace SpotifyLyricsWin.Ui;
 /// 修法三管齐下：①alpha=0 也显式赋 **Brushes.Transparent**——它是实打实的本地值，
 /// 主题资源怎么刷新都盖不住；②主题切换流程末尾再强制 ApplyStyle 一次（Program 侧）；
 /// ③给悬浮窗显式套一个空 Style（见构造），把库的隐含 Window 样式整体隔开。
+/// v0.8.5 白底案最终定案（读 WPF-UI 4.3.0 的 WindowBackdrop.cs 源码实锤）：
+/// 上面的属性层排查全对、却始终不是病灶——真正的涂白发生在**合成层**：
+/// WPF-UI 的 `WindowBackdrop.RemoveBackdrop` 内部调 RestoreContentBackground，
+/// 它把窗口的 `HwndSource.CompositionTarget.BackgroundColor` 设为
+/// **SystemColors.WindowColor**（浅色系统主题下 = 纯白 #FFFFFF），WPF 属性层
+/// 完全看不见（诊断一直报 Transparent、屏幕采样却是纯白，正是这一层）。
+/// 两个入口都会踩到它：主题应用内部的 UpdateBackground，以及 v0.8.4 误把
+/// RemoveBackdrop 当「摘层兜底」亲手调用的 StripFloatingBackdrop——后者等于
+/// 每次切主题自己涂一次白（v0.8.4 探针仍纯白的原因）。定案修法：全仓禁止
+/// 再对悬浮窗调 RemoveBackdrop；改为由本窗在句柄就绪、每次 ApplyStyle、
+/// 每次主题应用之后（Program 侧）直接把 CompositionTarget.BackgroundColor
+/// 重申为 Transparent（见 EnsureTransparentComposition），顺序必须在库的
+/// Apply 之后——那一手涂白躲不掉，就每次在它之后擦干净。
 /// </summary>
 public sealed class FloatingWindow : Window
 {
@@ -97,6 +111,11 @@ public sealed class FloatingWindow : Window
         ResizeMode = ResizeMode.NoResize;
         SizeToContent = SizeToContent.Height;
         Width = 880;
+
+        // v0.8.5：窗口句柄一就绪就把合成层背景重申为透明（见类头定案）；
+        // 此后每次 ApplyStyle 与每次主题应用之后（Program 侧）都会再重申，
+        // 专门擦掉库在 RemoveBackdrop 路径里涂上的系统窗口色。
+        SourceInitialized += (_, _) => EnsureTransparentComposition();
 
         // v0.8 背景「雾面」定因（实锤）：歌词文字此前挂了**双重阴影**——GradientLyricLine
         // 的 OnRender 内部已按字形手绘一遍偏移阴影，外面又给每行套了一个 DropShadowEffect。
@@ -395,6 +414,46 @@ public sealed class FloatingWindow : Window
         catch { return fallback; }
     }
 
+    /// <summary>
+    /// v0.8.5：把窗口**合成层**背景（HwndSource.CompositionTarget.BackgroundColor）
+    /// 显式重申为全透明。白底案的涂色就发生在这一层：WPF-UI 的 RemoveBackdrop
+    /// （主题应用内部的 UpdateBackground 也会走到）会把它涂成 SystemColors
+    /// .WindowColor（浅色下纯白），且 WPF 属性层完全看不见——Background 属性
+    /// 再干净也拦不住。故每次主题应用之后、每次 ApplyStyle、窗口句柄就绪时
+    /// 都在这里擦一遍；顺序铁律：在库的 Apply **之后**执行。拿不到 HwndSource
+    /// （窗口尚未显示等）时静默跳过，下一个时机再补。
+    /// </summary>
+    public void EnsureTransparentComposition()
+    {
+        try
+        {
+            if (PresentationSource.FromVisual(this) is HwndSource source
+                && source.CompositionTarget != null)
+            {
+                source.CompositionTarget.BackgroundColor = Colors.Transparent;
+            }
+        }
+        catch { /* 拿不到句柄时静默跳过，下次时机再试 */ }
+    }
+
+    /// <summary>当前合成层背景色的诊断文本（供 [透明诊断] 的 compBg 字段）。</summary>
+    public string CompositionBackgroundText()
+    {
+        try
+        {
+            if (PresentationSource.FromVisual(this) is HwndSource source
+                && source.CompositionTarget != null)
+            {
+                Color c = source.CompositionTarget.BackgroundColor;
+                return c == Colors.Transparent
+                    ? "Transparent"
+                    : $"#{c.A:X2}{c.R:X2}{c.G:X2}{c.B:X2}";
+            }
+        }
+        catch { /* 取不到按未知处理 */ }
+        return "未知";
+    }
+
     public void ApplyStyle()
     {
         // v0.7 解耦铁律：窗口本体背景恒透明，每次套样式都重申——主题系统或任何外部
@@ -402,7 +461,9 @@ public sealed class FloatingWindow : Window
         // v0.8.2：无论 alpha 是多少，窗口背景都显式赋 Transparent 本地值。
         // v0.8.1 曾在 alpha=0 时赋 null，实测一改主题就被库的隐含 Window 样式背景
         // 接管变白（详见类头注释）——null 不是「透明」，是「把决定权让给样式层」。
+        // v0.8.5：属性层之外，合成层背景也要一并重申（见 EnsureTransparentComposition）。
         Background = Brushes.Transparent;
+        EnsureTransparentComposition();
 
         var hi = ParseHex(_settings.HighlightColorHex, Color.FromArgb(0xFF, 0x1E, 0xD7, 0x60));
         var normal = ParseHex(_settings.TextColorHex, Colors.White);
@@ -439,6 +500,8 @@ public sealed class FloatingWindow : Window
 
         // 透明诊断（v0.8.1 起）：把有效值快照限频写进日志，Sun 再复现可直接回传这行定因。
         // v0.8.2 起窗口/根背景在 alpha=0 时应恒为 Transparent（全零 alpha 的显式画刷）。
+        // v0.8.5 起新增 compBg（合成层背景色）：上面刚调过 EnsureTransparentComposition，
+        // 这里读到的应恒为 Transparent——它非 Transparent 才是白底案复发的铁证。
         int effectCount = 0;
         foreach (var el in new UIElement[] { _currentLine, _translationLine, _nextBlock, _lockButton, _closeButton })
             if (el.Effect != null) effectCount++;
@@ -453,6 +516,7 @@ public sealed class FloatingWindow : Window
             TransparencyDiag.Format(
                 DescribeBrush(Background),
                 DescribeBrush(_rootBorder.Background),
+                CompositionBackgroundText(),
                 effectCount, alpha),
             10_000);
 

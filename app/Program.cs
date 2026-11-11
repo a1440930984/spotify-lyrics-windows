@@ -457,6 +457,16 @@ public static class Program
         // 修法：明确传 WindowBackdropType.None 从源头关掉这步。设置窗/选词窗
         // 各自的背景走它们 FluentWindow 的 WindowBackdropType = Theme.Backdrop，
         // 与这个全局参数无关、不受影响。
+        // v0.8.5 更正（读 WindowBackdrop.cs 源码实锤）：None 并没有把路堵死——
+        // UpdateBackground 无论 backdrop 传什么，内部都先调
+        // WindowBackdrop.RemoveBackdrop，而 RemoveBackdrop 的
+        // RestoreContentBackground 会把该窗口的**合成层背景**
+        // （HwndSource.CompositionTarget.BackgroundColor）涂成
+        // SystemColors.WindowColor（浅色系统主题下纯白 #FFFFFF），WPF 属性层
+        // 看不见、擦不掉（Win11 新版路径靠它内部后续 RemoveBackground 擦回，
+        // 老路径擦不回、剩纯白——与探针纯白吻合）。真正的修复是每次 Apply
+        // 之后由悬浮窗自己把合成层重申为 Transparent（本函数末尾的
+        // EnsureFloatingTransparency + FloatingWindow.ApplyStyle 内顺带）。
         // updateAccent 传 false：强调色紧接着由下面一行
         // ApplicationAccentColorManager.Apply(palette.Accent, ...) 单独套用
         // （一直以来的口径）；若让 Apply 内部先套一遍系统强调色纯属重复，
@@ -492,31 +502,35 @@ public static class Program
             _fluentOverrideKeys.Add(key);
         }
 
-        // 主题应用完成后的兜底清理（v0.8.4，详见 StripFloatingBackdrop）：
-        // InitFluentUi 时悬浮窗还没创建、自动跳过；切主题时摘层 + 重申样式。
-        StripFloatingBackdrop();
+        // 主题应用完成后的兜底重申（v0.8.5，详见 EnsureFloatingTransparency）：
+        // InitFluentUi 时悬浮窗还没创建、自动跳过；切主题时擦合成层 + 重申样式。
+        // 顺序是关键：必须在上面 Apply **之后**——库在 Apply 内部涂的那一手
+        // 躲不掉，只能涂完立刻擦。
+        EnsureFloatingTransparency();
     }
 
     /// <summary>
-    /// v0.8.4 兜底清理：把悬浮窗上可能已被糊上的 DWM 系统背景层显式摘掉
-    /// （WindowBackdrop.RemoveBackdrop），随后 ApplyStyle 重申背景本地值。
-    /// ApplyFluentTheme 已传 WindowBackdropType.None 从源头关停，这一步是
-    /// 双保险——专治「旧版本/旧路径已糊上、本次 Apply 没机会再碰它」的残留。
-    /// 悬浮窗尚未创建时（InitFluentUi 路径）静默跳过。每次执行都写一行日志，
-    /// 与 [透明自检] 探针互相印证（切主题后四角应采到窗外真实底色）。
+    /// v0.8.5 兜底重申（替代 v0.8.4 的 StripFloatingBackdrop）：主题应用刚把
+    /// 悬浮窗的合成层背景涂成系统窗口色（见 ApplyFluentTheme 内 v0.8.5 更正
+    /// 注释），这里立刻让悬浮窗把合成层重申为 Transparent、再 ApplyStyle
+    /// 重申属性层样式，两层都擦干净。**严禁**再对悬浮窗调用
+    /// WindowBackdrop.RemoveBackdrop——它名叫「移除背景」、实为涂白函数，
+    /// v0.8.4 正是误用它当兜底、每次切主题亲手涂白一次。悬浮窗尚未创建时
+    /// （InitFluentUi 路径）静默跳过。每次执行都写一行日志，与 [透明诊断]
+    /// 的 compBg 字段及 [透明自检] 探针互相印证。
     /// </summary>
-    private static void StripFloatingBackdrop()
+    private static void EnsureFloatingTransparency()
     {
         if (_floating == null) return;
         try
         {
-            Wpf.Ui.Controls.WindowBackdrop.RemoveBackdrop(_floating);
+            _floating.EnsureTransparentComposition();
             _floating.ApplyStyle();
-            AppLog.Write("[透明修复] 主题应用后已对悬浮窗 RemoveBackdrop（摘除系统背景层）并重申样式");
+            AppLog.Write("[透明修复] 主题应用后已重申悬浮窗合成层透明（CompositionTarget=Transparent）并重申样式");
         }
         catch (Exception ex)
         {
-            AppLog.Write($"[透明修复] RemoveBackdrop 失败（忽略）：{ex.GetType().Name}: {ex.Message}");
+            AppLog.Write($"[透明修复] 合成层透明重申失败（忽略）：{ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -529,10 +543,10 @@ public static class Program
         Theme.Apply(_settings.UiTheme);
         ApplyFluentTheme();
         // 主题切换兜底（v0.7 起）：让悬浮窗在主题应用**之后**再重申一遍自己的样式。
-        // 注：v0.8.4 已查实变白真凶是 WPF-UI 给 MainWindow（=悬浮窗）糊的
-        // Mica 系统背景层，与 WPF 属性/样式无关——源头关停与摘层都在
-        // ApplyFluentTheme 里（None + StripFloatingBackdrop）；这里这遍
-        // ApplyStyle 只作额外的样式重申，无害保留。
+        // 注：白底案最终定案（v0.8.5）是库在 RemoveBackdrop 路径里把悬浮窗
+        // **合成层**背景涂成系统窗口色——合成层的擦除在 ApplyFluentTheme
+        // 末尾（EnsureFloatingTransparency）与 ApplyStyle 内部顺带完成；
+        // 这里这遍 ApplyStyle 同样会顺带重申合成层，无害保留。
         _floating.ApplyStyle();
         AppLog.Write($"[设置] 界面主题切换为「{Theme.Current.DisplayName}」（{_settings.UiTheme}）");
         // v0.8.3：主题切换是「变白案」的已知触发点——切换后 2 秒采一次屏幕实测像素取证
