@@ -60,7 +60,41 @@ public static class Theme
         rd[typeof(ListBoxItem)] = ListBoxItemStyle();
         rd[typeof(ComboBox)] = ComboBoxStyle();
         rd[typeof(ComboBoxItem)] = ComboBoxItemStyle();
+        // v0.5：细滚动条（XamlReader 模板）；加载失败则不注册、回退系统滚动条
+        var thin = ThinScroll.Load();
+        if (thin != null) rd.MergedDictionaries.Add(thin);
         return rd;
+    }
+
+    // ---------- v0.5 卡片式布局（现代化改版：大圆角、卡片分层、留白） ----------
+
+    /// <summary>
+    /// 分区卡片：#1E1E1E 底 + 1px 描边 + 圆角 12，顶部小号灰色分区标题，
+    /// 正文 StackPanel（内边距 16）交给调用方填充。卡片之间留 12 间距。
+    /// </summary>
+    public static (Border Card, StackPanel Body) MakeCard(string title)
+    {
+        var body = new StackPanel { Margin = new Thickness(16, 4, 16, 16) };
+        var inner = new StackPanel();
+        inner.Children.Add(new TextBlock
+        {
+            Text = title,
+            FontSize = 11.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = SubTextBrush,
+            Margin = new Thickness(16, 13, 16, 6)
+        });
+        inner.Children.Add(body);
+        var card = new Border
+        {
+            Background = PanelBrush,
+            BorderBrush = BorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Child = inner,
+            Margin = new Thickness(0, 0, 0, 12)
+        };
+        return (card, body);
     }
 
     // ---------- 通用小工具 ----------
@@ -71,7 +105,7 @@ public static class Theme
         border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
         border.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
         border.SetValue(Border.BorderThicknessProperty, new TemplateBindingExtension(Control.BorderThicknessProperty));
-        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
         border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
         return border;
     }
@@ -117,7 +151,7 @@ public static class Theme
         s.Setters.Add(new Setter(Control.ForegroundProperty, TextBrush));
         s.Setters.Add(new Setter(Control.BorderBrushProperty, BorderBrush));
         s.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
-        s.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 4, 12, 4)));
+        s.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(16, 6, 16, 6)));
         s.Setters.Add(new Setter(Control.FontFamilyProperty, UiFont));
         s.Setters.Add(new Setter(Control.TemplateProperty, tpl));
         return s;
@@ -286,7 +320,7 @@ public static class Theme
     private static Style ListBoxStyle()
     {
         var border = BorderWithContent("Bd");
-        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(10));
         var sv = new FrameworkElementFactory(typeof(ScrollViewer), "PART_ScrollViewer");
         sv.SetValue(ScrollViewer.CanContentScrollProperty, true);
         var presenter = new FrameworkElementFactory(typeof(ItemsPresenter));
@@ -308,7 +342,7 @@ public static class Theme
         var border = new FrameworkElementFactory(typeof(Border), "Bd");
         border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
         border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
-        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
         var cp = new FrameworkElementFactory(typeof(ContentPresenter));
         cp.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
         border.AppendChild(cp);
@@ -356,7 +390,7 @@ public static class Theme
         border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
         border.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
         border.SetValue(Border.BorderThicknessProperty, new TemplateBindingExtension(Control.BorderThicknessProperty));
-        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
         grid.AppendChild(border);
 
         var contentSite = new FrameworkElementFactory(typeof(ContentPresenter), "ContentSite");
@@ -402,7 +436,7 @@ public static class Theme
         popupBorder.SetValue(Border.BackgroundProperty, PanelBrush);
         popupBorder.SetValue(Border.BorderBrushProperty, BorderBrush);
         popupBorder.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-        popupBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        popupBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(10));
         popupBorder.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 2, 0, 0));
         popupBorder.SetBinding(FrameworkElement.MinWidthProperty, new Binding("ActualWidth")
         { RelativeSource = RelativeSource.TemplatedParent });

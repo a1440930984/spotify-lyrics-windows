@@ -59,12 +59,12 @@ public sealed class ColorPickerWindow : ThemedWindow
 
         (_h, _s, _v) = RgbToHsv(initial);
 
-        var panel = new StackPanel { Margin = new Thickness(14) };
+        var panel = new StackPanel { Margin = new Thickness(16) };
 
         // ---- 预览 + hex ----
         _preview = new Border
         {
-            Width = 42, Height = 42, CornerRadius = new CornerRadius(10),
+            Width = 44, Height = 44, CornerRadius = new CornerRadius(12),
             BorderBrush = Theme.BorderBrush,
             BorderThickness = new Thickness(1.5)
         };

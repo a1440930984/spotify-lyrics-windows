@@ -10,7 +10,7 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>SpotifyLyricsWin</AssemblyName>
     <RootNamespace>SpotifyLyricsWin</RootNamespace>
-    <Version>0.4.1</Version>
+    <Version>0.5.0</Version>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
 

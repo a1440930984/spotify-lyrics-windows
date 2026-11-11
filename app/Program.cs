@@ -46,7 +46,7 @@ public static class Program
         // v0.3：启动先落一行日志，保证 log.txt 必然存在（v0.2 只在广告命中时写，
         // 从未命中就没文件，用户找不到）。路径：%AppData%/SpotifyLyricsWin/log.txt
         AppLog.EnsureFile();
-        AppLog.Write("[启动] SpotifyLyricsWin v0.4 启动");
+        AppLog.Write("[启动] SpotifyLyricsWin v0.5 启动");
 
         // v0.4：先看上次自动更新的结果（Updater 写的 update-result.json），汇报一次后删掉
         var lastResult = UpdateService.ReadResult();
@@ -330,7 +330,7 @@ public static class Program
     {
         if (_manualWindow != null) { _manualWindow.Activate(); return; }
         var t = _tracker.Current;
-        _manualWindow = new ManualLyricsWindow(t?.Title ?? "", t?.Artist ?? "");
+        _manualWindow = new ManualLyricsWindow(t?.Title ?? "", t?.Artist ?? "", _settings);
         _manualWindow.SearchAsync = (title, artist, ct) =>
             _service.SearchCandidatesAsync(title, artist, ct);
         _manualWindow.ApplyAsync = async candidate =>
@@ -412,7 +412,10 @@ public static class Program
         }
 
         _floating.SetDimmed(!track.IsPlaying);
-        long progress = track.CurrentProgress() + _settings.LyricsOffsetMs;
+        // v0.5：进度改读 ProgressClock 的平滑显示进度（observe 校正、无死区硬跳）；
+        // 时钟暂无样本时回退到曲目自带外推兜底。
+        long smooth = _tracker.CurrentProgressMs();
+        long progress = (smooth >= 0 ? smooth : track.CurrentProgress()) + _settings.LyricsOffsetMs;
         if (progress < 0) progress = 0;
 
         var lyrics = _engine.Lyrics;

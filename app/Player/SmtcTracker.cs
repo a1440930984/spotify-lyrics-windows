@@ -6,8 +6,12 @@ namespace SpotifyLyricsWin.Player;
 /// <summary>
 /// 通过 Windows SMTC（GlobalSystemMediaTransportControls）跟踪播放。
 /// 优先选 SourceAppUserModelId 含 "Spotify" 的会话；没有时用系统当前会话兜底。
-/// SMTC 的 Timeline 更新稀疏，这里每次轮询拿到 position 后存下基准，
-/// 两次轮询之间由 TrackInfo 按流逝时间外推（暂停停表），40ms tick 驱动扫光。
+///
+/// 进度（v0.5 重做）：SMTC 时间线更新稀疏，样本一律喂给 ProgressClock.Observe 消化——
+/// 样本位置对应时间线 **LastUpdatedTime** 时刻（换算到单调时钟域），不是轮询收到时刻；
+/// 死区丢弃样本 + 到阈值硬跳的旧逻辑已废除（逐字「跑快了回退」的元凶）。
+/// 两次轮询之间 tick（40ms）读 ProgressClock.PositionMs 平滑外推。
+/// TrackInfo 只承载曲目元数据（标题/歌手/专辑/时长/封面），其 ProgressMs 为最近样本原值。
 /// </summary>
 public sealed class SmtcTracker
 {
@@ -15,11 +19,15 @@ public sealed class SmtcTracker
     private GlobalSystemMediaTransportControlsSession? _session;
     private TrackInfo? _current;
     private bool _polling;
+    private string _clockKey = "";
+    private long _lastClockLogMs;
+
+    private readonly ProgressClock _clock = new(() => TrackInfo.NowMs());
 
     public TrackInfo? Current => _current;
     public bool HasSession => _session != null;
 
-    /// <summary>轮询一次（约每 500ms 调一次）。会话/曲目/进度有变时重设外推基准。</summary>
+    /// <summary>轮询一次（约每 500ms 调一次）。每个样本必过 ProgressClock.Observe。</summary>
     public async Task PollAsync()
     {
         if (_polling) return;
@@ -36,10 +44,10 @@ public sealed class SmtcTracker
             }
             picked ??= _manager.GetCurrentSession();
             _session = picked;
-            if (picked == null) { _current = null; return; }
+            if (picked == null) { SetNoTrack(); return; }
 
             var props = await picked.TryGetMediaPropertiesAsync();
-            if (props == null || string.IsNullOrWhiteSpace(props.Title)) { _current = null; return; }
+            if (props == null || string.IsNullOrWhiteSpace(props.Title)) { SetNoTrack(); return; }
 
             var timeline = picked.GetTimelineProperties();
             var playback = picked.GetPlaybackInfo();
@@ -52,15 +60,21 @@ public sealed class SmtcTracker
             long durationMs = Math.Max(0, endMs - startMs);
             if (posMs < 0) posMs = 0;
 
-            var now = TrackInfo.NowMs();
-            var prev = _current;
-            bool sameTrack = prev != null && prev.Title == props.Title && prev.Artist == props.Artist;
-            // 同一首歌且外推进度与 SMTC 报告相差 <1.5s 时保留旧基准，避免每轮询一次就抖一下
-            if (sameTrack && prev!.IsPlaying == isPlaying &&
-                Math.Abs(prev.CurrentProgress(now) - posMs) < 1500)
+            // 样本时刻 = 时间线 LastUpdatedTime（位置在那一刻的值）。
+            // 换算到 Stopwatch 单调时钟域：now单调 − (现实时间 − LastUpdatedTime)。
+            // 读不到/异常（默认最小值、晚于现在）时退回轮询时刻。
+            long nowMs = TrackInfo.NowMs();
+            long sampleAtMs = nowMs;
+            try
             {
-                return;
+                var lut = timeline.LastUpdatedTime;
+                if (lut > DateTimeOffset.MinValue)
+                {
+                    double ageMs = (DateTimeOffset.Now - lut).TotalMilliseconds;
+                    if (ageMs >= -1000) sampleAtMs = nowMs - (long)Math.Max(0, ageMs);
+                }
             }
+            catch { /* 个别会话 LastUpdatedTime 异常：用轮询时刻兜底 */ }
 
             _current = new TrackInfo
             {
@@ -70,10 +84,28 @@ public sealed class SmtcTracker
                 DurationMs = durationMs,
                 ProgressMs = posMs,
                 IsPlaying = isPlaying,
-                // v0.3：封面图有无是广告识别的组合信号（广告常无封面）；读不到引用即按无封面
+                // 封面图有无仍记录进日志备查（v0.5 广告规则已不依赖它）
                 HasCover = props.Thumbnail != null,
-                UpdatedAtMs = now
+                UpdatedAtMs = nowMs
             };
+
+            // 切歌（key 变化）先重置时钟，再喂样本
+            if (_current.Key != _clockKey)
+            {
+                _clockKey = _current.Key;
+                _clock.Reset();
+            }
+            var action = _clock.Observe(posMs, sampleAtMs, isPlaying, durationMs);
+
+            // 诊断日志（限频 10 秒一行）：补偿/硬跳事件留痕，便于用户反馈时对账
+            if ((action == ClockAction.Compensating || action == ClockAction.SeekSnap) &&
+                nowMs - _lastClockLogMs >= 10_000)
+            {
+                _lastClockLogMs = nowMs;
+                AppLog.Write(action == ClockAction.SeekSnap
+                    ? $"[进度时钟] 偏差 {_clock.LastDeviationMs}ms 超阈值，按 seek 硬跳校正"
+                    : $"[进度时钟] 偏差 {_clock.LastDeviationMs}ms，速率补偿收敛中（×{_clock.CurrentRate:F2}）");
+            }
         }
         catch
         {
@@ -82,11 +114,20 @@ public sealed class SmtcTracker
         finally { _polling = false; }
     }
 
-    /// <summary>当前外推进度（毫秒），无曲目返回 -1。</summary>
+    private void SetNoTrack()
+    {
+        _current = null;
+        if (_clockKey.Length > 0)
+        {
+            _clockKey = "";
+            _clock.Reset();
+        }
+    }
+
+    /// <summary>当前平滑显示进度（毫秒），无曲目/无样本返回 -1。tick 驱动扫光用。</summary>
     public long CurrentProgressMs()
     {
-        var t = _current;
-        if (t == null) return -1;
-        return t.CurrentProgress();
+        if (_current == null) return -1;
+        return _clock.PositionMs();
     }
 }

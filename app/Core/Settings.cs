@@ -31,6 +31,12 @@ public sealed class Settings
     public bool PositionLocked { get; set; } = false;
     /// <summary>v0.2 新增：单行模式（仅当前行；双行 = 当前行 + 下一行）</summary>
     public bool SingleLineMode { get; set; } = false;
+    /// <summary>v0.5 新增：设置窗位置记忆（Left/Top，DIP；null = 没记过，首开居中）</summary>
+    public double? SettingsWindowX { get; set; }
+    public double? SettingsWindowY { get; set; }
+    /// <summary>v0.5 新增：手动选词窗位置记忆（颜色盘明确不记忆，每次居中于所有者）</summary>
+    public double? ManualWindowX { get; set; }
+    public double? ManualWindowY { get; set; }
 
     public void Normalize()
     {

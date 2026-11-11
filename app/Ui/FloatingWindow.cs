@@ -33,7 +33,8 @@ public sealed class FloatingWindow : Window
     private readonly DispatcherTimer _hideButtonsTimer;
     private readonly RowDefinition _bandRow;
 
-    private const double BandHeight = 30;
+    private const double BandHeight = 34;
+    private Border _bandCapsule = null!;
     private bool _bandShown;
     private double _lastHeight = -1;
     private bool _suppressCenterKeep;
@@ -100,55 +101,74 @@ public sealed class FloatingWindow : Window
         stack.Children.Add(_nextBlock);
 
         // ---- 按钮组：锁定 + 关闭（v0.3 移到独立按钮带，不再压在歌词上） ----
+        // v0.5：按钮带改深色半透明胶囊衬底 + 图标白色描边带深色阴影——
+        // 用户反馈在白色背景下旧版的裸图标「跟没有一样」，胶囊底让白底黑底都清晰。
+        var buttonShadow = new DropShadowEffect
+        {
+            Color = Colors.Black,
+            Opacity = 0.95,
+            Direction = 270,
+            ShadowDepth = 1,
+            BlurRadius = 3
+        };
         _lockButton = new Button
         {
-            Width = 30,
-            Height = 26,
-            Opacity = 0.85,
+            Width = 36,
+            Height = 28,
             Visibility = Visibility.Collapsed,
             Background = Brushes.Transparent,
             Foreground = Brushes.White,
             BorderThickness = new Thickness(0),
-            FontSize = 12,
+            FontSize = 15,
             Cursor = Cursors.Hand,
-            Margin = new Thickness(0, 0, 4, 0),
+            Margin = new Thickness(0, 0, 2, 0),
             ToolTip = "锁定/解锁位置",
+            Effect = buttonShadow,
             FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI")
         };
         _lockButton.Click += (_, _) => ToggleLock();
         _closeButton = new Button
         {
             Content = "✕",
-            Width = 30,
-            Height = 26,
-            Opacity = 0.85,
+            Width = 36,
+            Height = 28,
             Visibility = Visibility.Collapsed,
             Background = Brushes.Transparent,
             Foreground = Brushes.White,
             BorderThickness = new Thickness(0),
-            FontSize = 12,
+            FontSize = 14,
             Cursor = Cursors.Hand,
+            Effect = buttonShadow,
             ToolTip = "隐藏歌词"
         };
         _closeButton.Click += (_, _) => CloseRequested?.Invoke();
 
-        var buttons = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Center
-        };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal };
         buttons.Children.Add(_lockButton);
         buttons.Children.Add(_closeButton);
 
-        // 两行布局：第 0 行按钮带（默认高 0，显形时扩到 30）、第 1 行歌词区
+        var capsule = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(0x8C, 0x14, 0x14, 0x14)), // rgba(20,20,20,0.55)
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(16),
+            Padding = new Thickness(5, 2, 5, 2),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed,
+            Child = buttons
+        };
+
+        // 两行布局：第 0 行按钮带（默认高 0，显形时扩到 BandHeight）、第 1 行歌词区
         _bandRow = new RowDefinition { Height = new GridLength(0) };
         var grid = new Grid();
         grid.RowDefinitions.Add(_bandRow);
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        Grid.SetRow(buttons, 0);
+        Grid.SetRow(capsule, 0);
         Grid.SetRow(stack, 1);
-        grid.Children.Add(buttons);
+        _bandCapsule = capsule;
+        grid.Children.Add(capsule);
         grid.Children.Add(stack);
 
         _rootBorder = new Border
@@ -241,10 +261,12 @@ public sealed class FloatingWindow : Window
 
     private void UpdateLockButton()
     {
-        // 🔒 = 已锁定（不可拖）；🔓 = 未锁定。锁定时按钮描边提示状态。
+        // 🔒 = 已锁定（不可拖）；🔓 = 未锁定。v0.5：锁定态用绿色半透明底衬提示状态
+        // （胶囊带里不再用描边，避免与胶囊自身的描边混淆）。
         _lockButton.Content = _settings.PositionLocked ? "🔒" : "🔓";
-        _lockButton.BorderThickness = new Thickness(_settings.PositionLocked ? 1 : 0);
-        _lockButton.BorderBrush = new SolidColorBrush(Color.FromArgb(0xAA, 0xFF, 0xFF, 0xFF));
+        _lockButton.Background = _settings.PositionLocked
+            ? new SolidColorBrush(Color.FromArgb(0x40, 0x1E, 0xD7, 0x60))
+            : Brushes.Transparent;
     }
 
     private void RevealButtons()
@@ -267,6 +289,7 @@ public sealed class FloatingWindow : Window
         _suppressCenterKeep = true;
         _bandRow.Height = new GridLength(show ? BandHeight : 0);
         var vis = show ? Visibility.Visible : Visibility.Collapsed;
+        _bandCapsule.Visibility = vis;
         _closeButton.Visibility = vis;
         _lockButton.Visibility = vis;
         if (!double.IsNaN(Top) && IsLoaded) Top -= delta;

@@ -133,6 +133,45 @@ public abstract class ThemedWindow : Window
         _titleText.Text = title;
     }
 
+    // ---------- v0.5 窗口位置记忆（设置窗/手动选词窗用；颜色盘不用，每次居中于所有者） ----------
+
+    /// <summary>
+    /// 有合法记忆位置 → 原位打开；没有（首次）→ 主屏幕居中。
+    /// 之后移动/关闭时经 save 回调落盘（调用方写 Settings 字段 + 防抖保存）。
+    /// 记忆点已不在任何屏幕可见区（换显示器/改分辨率）时回退居中，不会开到屏幕外。
+    /// </summary>
+    protected void UsePositionMemory(double? savedX, double? savedY, Action<double, double> save)
+    {
+        if (savedX is double x && savedY is double y && IsPointVisible(x, y))
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Left = x;
+            Top = y;
+        }
+        else
+        {
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        }
+        LocationChanged += (_, _) =>
+        {
+            if (IsLoaded && WindowState == WindowState.Normal) save(Left, Top);
+        };
+        Closed += (_, _) =>
+        {
+            if (WindowState == WindowState.Normal) save(Left, Top);
+        };
+    }
+
+    private static bool IsPointVisible(double x, double y)
+    {
+        // 虚拟屏幕包围盒（DIP）内，且右缘至少留 60px、顶部不高于屏幕上沿太多、底部留标题栏高度
+        double vl = SystemParameters.VirtualScreenLeft;
+        double vt = SystemParameters.VirtualScreenTop;
+        double vr = vl + SystemParameters.VirtualScreenWidth;
+        double vb = vt + SystemParameters.VirtualScreenHeight;
+        return x + 60 >= vl && x <= vr - 60 && y >= vt - 8 && y <= vb - 40;
+    }
+
     // ---------- DWM 圆角 + 阴影（尽力而为，失败不影响功能） ----------
 
     [DllImport("dwmapi.dll")]
