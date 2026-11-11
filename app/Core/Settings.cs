@@ -29,6 +29,7 @@ public static class Defaults
     public const bool ConvertTradToSimp = true;
     public const string TranslateService = "auto";
     public const bool AutoStartEnabled = false;
+    public const bool OpenSettingsOnStartup = true;          // v0.8.2：启动自动打开设置页（默认开，可关）
     public const string Empty = "";
 }
 
@@ -100,6 +101,12 @@ public sealed class Settings
     /// 设置窗打开时以注册表实际值对齐回写本字段）。
     /// </summary>
     public bool AutoStartEnabled { get; set; } = Defaults.AutoStartEnabled;
+    /// <summary>
+    /// v0.8.2 新增：启动时自动打开设置页（默认开）。更新完成后程序重启也算一次启动，
+    /// 故更新后展示结果与日常启动共用同一条自动打开路径（居中）；关掉则启动不弹
+    /// （更新结果仍在托盘状态/下次手动打开设置时可见）。
+    /// </summary>
+    public bool OpenSettingsOnStartup { get; set; } = Defaults.OpenSettingsOnStartup;
     /// <summary>
     /// v0.6 新增：纯音乐标记（曲目 Key 集合，借鉴 LyricFlow instrumentalKeys，上限 500，超限淘汰最旧）。
     /// 命中标记的曲目不再联网取词，悬浮窗显示「纯音乐」提示。

@@ -178,6 +178,19 @@ public static class Program
         if (_startupUpdateNote != null)
             _tray.SetStatus("SpotifyLyrics - " + _startupUpdateNote);
 
+        // v0.8.2：启动时自动打开设置页（默认开，「更新与启动」卡里可关）。
+        // 更新完成后的重启也是普通启动、同样走这条路——自动打开的这次强制居中，
+        // 更新结果正好显示在更新卡里；手动打开（托盘/悬浮窗/气泡）仍走位置记忆。
+        if (_settings.OpenSettingsOnStartup)
+        {
+            AppLog.Write("[启动] 「启动时打开设置页」=开，自动打开设置页（居中）");
+            OpenSettingsCore(centered: true);
+        }
+        else
+        {
+            AppLog.Write("[启动] 「启动时打开设置页」=关，本次不自动打开设置页");
+        }
+
         // SMTC 轮询：500ms
         var pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         pollTimer.Tick += async (_, _) =>
@@ -462,8 +475,9 @@ public static class Program
     {
         Theme.Apply(_settings.UiTheme);
         ApplyFluentTheme();
-        // v0.7：主题切换后让悬浮窗重申一遍自己的背景铁律（恒透明 + 背景透明度设置），
-        // 保证主题系统无论如何都碰不到悬浮窗背景（与主题彻底解耦的兜底动作）。
+        // 主题切换兜底（v0.7 起）：让悬浮窗在主题应用**之后**再重申一遍自己的样式。
+        // v0.8.2 起这遍重申写的是显式 Transparent 本地值（WPF 属性优先级最高），
+        // 且悬浮窗套了空 Style 隔离隐含样式——主题资源再怎么刷新也盖不住。
         _floating.ApplyStyle();
         AppLog.Write($"[设置] 界面主题切换为「{Theme.Current.DisplayName}」（{_settings.UiTheme}）");
         if (_manualWindow != null) { var m = _manualWindow; _manualWindow = null; m.Close(); }
@@ -476,10 +490,18 @@ public static class Program
         OpenSettings();
     }
 
-    private static void OpenSettings()
+    /// <summary>手动打开入口（托盘/悬浮窗/气泡/主题换装重开）：走设置窗的位置记忆。</summary>
+    private static void OpenSettings() => OpenSettingsCore(centered: false);
+
+    /// <summary>
+    /// 打开设置窗的统一入口（v0.8.2）：centered=true 只给程序自动打开的两条路径
+    /// （启动时自动打开、更新完成重启后随之而来的那次）——居中展示且不污染位置记忆；
+    /// 手动打开传 false。已开着则只激活，不重复造窗。
+    /// </summary>
+    private static void OpenSettingsCore(bool centered)
     {
         if (_settingsWindow != null) { _settingsWindow.Activate(); return; }
-        try { _settingsWindow = new SettingsWindow(_settings); }
+        try { _settingsWindow = new SettingsWindow(_settings, centered); }
         catch (Exception ex)
         {
             // v0.6：窗口打开异常必须留痕（v0.5.0 设置窗崩溃时用户只能口述「打不开」）
@@ -578,9 +600,12 @@ public static class Program
             // 先删旧助手日志：失败时用户打开的就是这一次的全新日志，不会和旧的混淆
             try { if (File.Exists(UpdateService.UpdaterLogPath)) File.Delete(UpdateService.UpdaterLogPath); } catch { }
 
-            var progress = new Progress<double>(p => win?.SetUpdateStatus($"正在下载更新… {p:F0}%"));
+            // v0.8.2：下载进度改为字节级回调（进度条 + 已下载/总 MB · 百分比文案）
+            var byteProgress = new Progress<DownloadProgressInfo>(
+                p => win?.SetUpdateProgress(p.DownloadedBytes, p.TotalBytes));
             await UpdateService.DownloadAssetAsync(_settings.GithubToken, release.ZipAsset,
-                UpdateService.DownloadedZipPath, progress);
+                UpdateService.DownloadedZipPath, byteProgress: byteProgress);
+            win?.HideUpdateProgress();
             win?.SetUpdateStatus("下载完成，正在准备更新…");
 
             UpdateService.ExtractToStaging(UpdateService.DownloadedZipPath);
@@ -607,6 +632,7 @@ public static class Program
         }
         catch (Exception ex)
         {
+            win?.HideUpdateProgress();
             win?.SetUpdateStatus($"更新没能开始：{ex.Message} 可再点「立即更新」重试。");
             win?.SetInstallEnabled(true);
             AppLog.Write($"[自动更新] 下载/准备失败：{ex.Message}");

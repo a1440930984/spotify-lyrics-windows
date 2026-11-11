@@ -177,27 +177,39 @@ public static class UpdateService
     /// <summary>
     /// 下载 Release 的 zip 资产。私有仓必须走资产 API + Accept: application/octet-stream 带令牌
     ///（浏览器直链对私有仓无效）。下载后核对字节数与资产 size，不一致视为失败。
+    /// v0.8.2：新增字节级进度回调 byteProgress（已接收 / 总字节）——总字节优先取资产 size
+    ///（查 Release 时就已知），资产没给时退响应头 ContentLength，再没有就是 -1（未知）；
+    /// 每攒够 256KB 才报一次，免得 UI 线程被进度洪水淹没。原百分比回调保留兼容。
     /// </summary>
     public static async Task DownloadAssetAsync(string token, ReleaseAsset asset, string destPath,
-        IProgress<double>? progress = null, CancellationToken ct = default)
+        IProgress<double>? progress = null, CancellationToken ct = default,
+        IProgress<DownloadProgressInfo>? byteProgress = null)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         using var req = NewRequest(AssetApi(asset.Id), token.Trim(), "application/octet-stream");
         using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!resp.IsSuccessStatusCode)
             throw new InvalidOperationException($"下载失败：GitHub 返回 {(int)resp.StatusCode}，请稍后重试。");
+        long totalBytes = asset.Size > 0 ? asset.Size : (resp.Content.Headers.ContentLength ?? -1);
+        byteProgress?.Report(new DownloadProgressInfo(0, totalBytes));
         Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
         await using (var fs = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None))
         await using (var net = await resp.Content.ReadAsStreamAsync(ct))
         {
             var buf = new byte[81920];
             long done = 0;
+            long lastReported = 0;
             int n;
             while ((n = await net.ReadAsync(buf, ct)) > 0)
             {
                 await fs.WriteAsync(buf.AsMemory(0, n), ct);
                 done += n;
                 if (asset.Size > 0) progress?.Report(done * 100.0 / asset.Size);
+                if (done - lastReported >= 256 * 1024 || done == totalBytes)
+                {
+                    lastReported = done;
+                    byteProgress?.Report(new DownloadProgressInfo(done, totalBytes));
+                }
             }
         }
         long actual = new FileInfo(destPath).Length;

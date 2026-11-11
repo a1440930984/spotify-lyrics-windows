@@ -1,43 +1,54 @@
 namespace SpotifyLyricsWin.Core;
 
 /// <summary>
-/// 设置窗布局常量与卡序（v0.8.1，纯逻辑供无头测试断言）：
-/// 窗口由 500×760 竖长条改近方形 920×660，八张卡双列排布——
-/// 左列（外观主线）：外观与逐字 → 颜色 → 背景与时间 → 译文与翻译
-/// （Sun 定案：译文卡在背景与时间下面，同列自上而下即阅读序）；
-/// 右列（功能杂项）：字体与歌词源 → 纯音乐标记 → 诊断与缓存 → 更新与启动。
-/// 窗口宽度 &lt; TwoColumnMinWidth 时回落单列：左列四卡 + 右列四卡顺排，
-/// 保持与双列相同的阅读顺序，窄窗下不挤坏控件。
+/// 设置窗布局常量与卡序（v0.8.2 网格化，纯逻辑供无头测试断言）：
+/// 八张卡排成 **2 列 × 4 行** 的方格，同行左右等高（行高取同行较高者、卡片拉伸填满），
+/// 重要卡靠前——行序定案：
+///   行1 外观与逐字 | 译文与翻译   （天天要看的显示与译文）
+///   行2 颜色       | 字体与歌词源
+///   行3 背景与时间 | 纯音乐标记
+///   行4 诊断与缓存 | 更新与启动   （低频维护类垫底）
+/// 默认尺寸 980×730（近方形，1080p 工作区能全放下）；窗口可缩放，尺寸不足时
+/// 外层 ScrollViewer 滚动兜底；窗宽 &lt; TwoColumnMinWidth 时回落单列，
+/// 单列顺序 = 网格逐行先左后右（与网格阅读序一致）。
+/// v0.8.1 的左右双列堆叠（各列内部不等高、两列总高还不一致）就此退役。
 /// </summary>
 public static class SettingsLayout
 {
-    public const double DefaultWidth = 920;
-    public const double DefaultHeight = 660;
-    /// <summary>双列下限：宽于此用双列（含等号）。两列各约 (760-28-10)/2 ≈ 361，与旧单列 440 宽相比略窄但卡内控件可承受。</summary>
+    public const double DefaultWidth = 980;
+    public const double DefaultHeight = 730;
+    /// <summary>双列（网格）下限：宽于此用 2×4 网格（含等号）。</summary>
     public const double TwoColumnMinWidth = 760;
     /// <summary>单列回落时的窗口最小宽（与旧版 440 同量级，卡内最宽控件组可放下）。</summary>
     public const double MinWidth = 460;
     public const double MinHeight = 480;
-    /// <summary>双列时两列之间的间距（与卡片纵向间距 10 一致）。</summary>
+    /// <summary>同行左右两卡之间的间距。</summary>
     public const double ColumnGap = 10;
+    /// <summary>相邻两行之间的间距（与卡片原纵向间距 10 一致）。</summary>
+    public const double RowGap = 10;
 
     public const string Look = "look";
-    public const string Color = "color";
-    public const string Time = "time";
     public const string Trans = "trans";
+    public const string Color = "color";
     public const string Font = "font";
+    public const string Time = "time";
     public const string Marks = "marks";
     public const string Log = "log";
     public const string Update = "update";
 
-    /// <summary>左列自上而下（阅读序）。</summary>
-    public static readonly string[] LeftColumn = { Look, Color, Time, Trans };
-    /// <summary>右列自上而下。</summary>
-    public static readonly string[] RightColumn = { Font, Marks, Log, Update };
-    /// <summary>单列回落顺序 = 左列序 + 右列序。</summary>
-    public static readonly string[] SingleColumn =
-        { Look, Color, Time, Trans, Font, Marks, Log, Update };
+    /// <summary>网格行（双列模式）：自上而下四行，每行 [左卡, 右卡]。</summary>
+    public static readonly string[][] GridRows =
+    {
+        new[] { Look, Trans },
+        new[] { Color, Font },
+        new[] { Time, Marks },
+        new[] { Log, Update },
+    };
 
-    /// <summary>给定窗口宽度是否使用双列（纯函数）。</summary>
+    /// <summary>单列回落顺序 = 网格逐行先左后右展开。</summary>
+    public static readonly string[] SingleColumn =
+        { Look, Trans, Color, Font, Time, Marks, Log, Update };
+
+    /// <summary>给定窗口宽度是否使用双列网格（纯函数）。</summary>
     public static bool UseTwoColumns(double windowWidth) => windowWidth >= TwoColumnMinWidth;
 }

@@ -25,6 +25,15 @@ namespace SpotifyLyricsWin.Ui;
 /// 可见背景只有根 Border 一处、且只由「背景透明度」设置决定——主题切换走的是另一套
 /// 资源系统，碰不到这里（v0.6 真机出现过切主题后悬浮窗背景变实、改透明度无效：
 /// ApplyStyle 当时只写根 Border、从不重申 Window.Background，一旦被外部改动就回不来）。
+/// v0.8.2 透明定因（二）：v0.8.1 在 alpha=0 时把 Window/根 Border 的 Background 设成
+/// **null**，本意「无物可画」，实则埋雷——WPF 依赖属性的优先级里，本地值（Local）
+/// 最高，样式设置器（Style setter）与样式里的 DynamicResource 都在它之下；给属性
+/// 赋 null 等于**没有留下能压住样式层的本地值**，于是 WPF-UI 在 Apply 主题时给所有
+/// Window 套的隐含样式/资源背景（浅色主题 = 白）就接管了悬浮窗，表现为「初启透明、
+/// 一改主题就变白」（Sun 真机复现路径精确吻合：启动时主题还没有重新 Apply 过）。
+/// 修法三管齐下：①alpha=0 也显式赋 **Brushes.Transparent**——它是实打实的本地值，
+/// 主题资源怎么刷新都盖不住；②主题切换流程末尾再强制 ApplyStyle 一次（Program 侧）；
+/// ③给悬浮窗显式套一个空 Style（见构造），把库的隐含 Window 样式整体隔开。
 /// </summary>
 public sealed class FloatingWindow : Window
 {
@@ -76,6 +85,10 @@ public sealed class FloatingWindow : Window
     public FloatingWindow(Settings settings)
     {
         _settings = settings;
+        // v0.8.2 样式隔离：显式套一个**空 Style**（只有 TargetType、无任何设置器）。
+        // 不套的话，App 资源里合并的 WPF-UI 字典给 Window 的隐含样式会在 Apply 主题时
+        // 把它的背景（浅色=白）刷到本窗上；显式 Style 是本地值，隐含样式从此进不来。
+        Style = new Style(typeof(Window));
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -93,7 +106,8 @@ public sealed class FloatingWindow : Window
         // 恒透明、根 Border 在透明度 0 时 Background=Transparent、无边框、无其他色层）。
         // 处置：渐变行去掉 Effect，只留控件内部那遍字形阴影（跟着字走、不成矩形）。
         // v0.8.1 加固：Sun 真机仍报不透明，本版把歌词区所有 Effect 清零（下一行/按钮
-        // 也不例外）、alpha=0 时背景改设 null（见 ApplyStyle），并加 [透明诊断] 日志。
+        // 也不例外），并加 [透明诊断] 日志。
+        // v0.8.2 更正：背景不再设 null（见类头注释的定因二），改显式 Transparent 本地值。
         _currentLine = new GradientLyricLine();
 
         // 译文用渐变行控件（与当前行同机制：按进度做字粒度渐变扫光）；
@@ -385,10 +399,10 @@ public sealed class FloatingWindow : Window
     {
         // v0.7 解耦铁律：窗口本体背景恒透明，每次套样式都重申——主题系统或任何外部
         // 改动都不能让悬浮窗长出底色；可见背景只有下方根 Border 一处。
-        // v0.8.1 加固：alpha=0 时窗口与根 Border 的背景直接设 **null**（连 Transparent
-        // 画刷都不挂，渲染层无物可画）；alpha>0 时窗口仍重申 Transparent 防外部改动。
-        int alpha0 = _settings.BgAlphaPercent;
-        Background = alpha0 <= 0 ? null : Brushes.Transparent;
+        // v0.8.2：无论 alpha 是多少，窗口背景都显式赋 Transparent 本地值。
+        // v0.8.1 曾在 alpha=0 时赋 null，实测一改主题就被库的隐含 Window 样式背景
+        // 接管变白（详见类头注释）——null 不是「透明」，是「把决定权让给样式层」。
+        Background = Brushes.Transparent;
 
         var hi = ParseHex(_settings.HighlightColorHex, Color.FromArgb(0xFF, 0x1E, 0xD7, 0x60));
         var normal = ParseHex(_settings.TextColorHex, Colors.White);
@@ -415,21 +429,23 @@ public sealed class FloatingWindow : Window
         if (!_dimmed) _nextBlock.Opacity = 0.6;
 
         // 唯一的背景来源：「背景透明度」设置（0 = 全透明纯文字）。
-        // v0.8.1：alpha=0 时根 Border 背景设 null（不是 Transparent 画刷）、边框画刷恒 null，
-        // 渲染层在透明模式下无任何色层可画；alpha>0 才刷半透明黑底（老行为不变）。
+        // v0.8.2：alpha=0 时根 Border 同样显式赋 Transparent 本地值（与窗口本体同理，
+        // 不给样式层留接管的空位）；alpha>0 才刷半透明黑底（老行为不变）；边框画刷恒 null。
         int alpha = _settings.BgAlphaPercent;
         _rootBorder.BorderBrush = null;
         _rootBorder.Background = alpha <= 0
-            ? null
+            ? Brushes.Transparent
             : new SolidColorBrush(Color.FromArgb((byte)(alpha * 255 / 100), 0, 0, 0));
 
-        // v0.8.1 透明诊断：把有效值快照限频写进日志，Sun 再复现可直接回传这行定因。
+        // 透明诊断（v0.8.1 起）：把有效值快照限频写进日志，Sun 再复现可直接回传这行定因。
+        // v0.8.2 起窗口/根背景在 alpha=0 时应恒为 Transparent（全零 alpha 的显式画刷）。
         int effectCount = 0;
         foreach (var el in new UIElement[] { _currentLine, _translationLine, _nextBlock, _lockButton, _closeButton })
             if (el.Effect != null) effectCount++;
         string DescribeBrush(Brush? b) => b switch
         {
             null => "null",
+            SolidColorBrush sc when sc.Color == Colors.Transparent => "Transparent",
             SolidColorBrush sc => $"Solid(#{sc.Color.A:X2}{sc.Color.R:X2}{sc.Color.G:X2}{sc.Color.B:X2})",
             _ => b.GetType().Name
         };

@@ -63,15 +63,14 @@ public sealed class SettingsWindow : FluentWindow
     private readonly StackPanel _credMs;
     private readonly TextBlock _cacheText;
     private readonly ToggleSwitch _autoStartSwitch;
+    private readonly ToggleSwitch _openOnStartupSwitch;
     private InstrumentalListWindow? _marksWindow;
     private bool _loading = true;
-    // v0.8.1 双列布局：卡片按 id 注册，容器（左列/右列/单列回落）由 ApplyCardLayout 按窗宽切换
+    // v0.8.2 网格布局：卡片按 id 注册，容器（2×4 网格 / 单列回落）由 ApplyCardLayout 按窗宽切换
     private readonly System.Collections.Generic.Dictionary<string, Card> _cardsById = new();
     private readonly Grid _cardsHost = new();
-    private readonly StackPanel _colLeft = new();
-    private readonly StackPanel _colRight = new();
     private readonly StackPanel _singlePanel = new();
-    private bool? _twoColMode;
+    private bool? _gridMode;
 
     /// <summary>任意设置变化（主程序据此重套悬浮窗样式；持久化走 Settings.RequestSave 防抖）。</summary>
     public event Action? LiveChanged;
@@ -93,6 +92,8 @@ public sealed class SettingsWindow : FluentWindow
     private bool _tokenShown;
     private bool _syncingToken;
     private readonly TextBlock _updateStatus;
+    // 系统 ProgressBar（WPF-UI 无自带 ProgressBar 控件，靠 ControlsDictionary 给它套 Fluent 样式）
+    private readonly ProgressBar _updateProgress;
     private readonly TextBlock _releaseNotes;
     private readonly Button _installBtn;
 
@@ -155,12 +156,16 @@ public sealed class SettingsWindow : FluentWindow
         }
     }
 
-    public SettingsWindow(Settings settings)
+    /// <param name="centerOnScreen">v0.8.2：本次打开是否强制屏幕居中。
+    /// 程序**自动打开**的两条路径传 true（启动时自动打开、更新完成重启后的自动打开——
+    /// 共用同一入口）：那是程序替用户开的窗，应居中展示；用户手动打开（托盘/悬浮窗/气泡）
+    /// 一律走位置记忆。且居中打开**不回写**位置记忆，两条路径互不污染。</param>
+    public SettingsWindow(Settings settings, bool centerOnScreen = false)
     {
         _settings = settings;
         // v0.8：版本号动态取程序集版本，别再硬编码（旧标题里写死过旧版号）
         Title = $"Spotify 歌词 · 设置 v{UpdateService.CurrentVersion}";
-        // v0.8.1：500×760 竖长条改近方形（920×660），卡片双列排布（见 Core.SettingsLayout）
+        // v0.8.2：近方形网格窗（980×730），八卡 2×4 方格排布（见 Core.SettingsLayout）
         Width = SettingsLayout.DefaultWidth;
         Height = SettingsLayout.DefaultHeight;
         MinWidth = SettingsLayout.MinWidth;
@@ -517,6 +522,17 @@ public sealed class SettingsWindow : FluentWindow
             Margin = new Thickness(0, 8, 0, 0)
         };
         upd.Children.Add(_updateStatus);
+        // v0.8.2：下载进度条（平时藏起，下载时由主程序经 SetUpdateProgress 驱动；
+        // 文案同步写在 _updateStatus 里：已下载 MB / 总 MB · 百分比）
+        _updateProgress = new ProgressBar
+        {
+            Minimum = 0,
+            Maximum = 100,
+            Height = 6,
+            Margin = new Thickness(0, 6, 0, 0),
+            Visibility = Visibility.Collapsed
+        };
+        upd.Children.Add(_updateProgress);
         _releaseNotes = new TextBlock
         {
             Foreground = Theme.SubTextBrush,
@@ -544,6 +560,9 @@ public sealed class SettingsWindow : FluentWindow
         // v0.8：开机自动启动（走 HKCU Run 注册表，见 Ui.AutoStartRegistry）
         _autoStartSwitch = AddSwitchRow(upd, "开机自动启动（登录 Windows 后自动运行）",
             v => SetAutoStart(v));
+        // v0.8.2：启动时自动打开设置页（默认开；更新后重启也走这条自动打开路径）
+        _openOnStartupSwitch = AddSwitchRow(upd, "启动时打开设置页（程序启动后自动打开一次，居中显示）",
+            v => { _settings.OpenSettingsOnStartup = v; AppLog.WriteLimited("set-openonstartup", $"[设置] 启动时打开设置页 = {v}", 5000); });
 
         // 没有「完成」按钮——所有改动实时生效，关窗请用标题栏 ✕。
 
@@ -562,9 +581,9 @@ public sealed class SettingsWindow : FluentWindow
             _settings.SettingsWindowX = x;
             _settings.SettingsWindowY = y;
             _settings.RequestSave();
-        });
+        }, centerOnScreen);
 
-        // v0.8.1：卡片排布按窗宽切换双列/单列（阈值见 SettingsLayout.TwoColumnMinWidth）
+        // v0.8.2：卡片排布按窗宽切换 2×4 网格/单列回落（阈值见 SettingsLayout.TwoColumnMinWidth）
         ApplyCardLayout(SettingsLayout.UseTwoColumns(Width));
         SizeChanged += (_, _) => ApplyCardLayout(SettingsLayout.UseTwoColumns(ActualWidth));
 
@@ -595,37 +614,54 @@ public sealed class SettingsWindow : FluentWindow
     }
 
     /// <summary>
-    /// v0.8.1 卡片排布：双列（左 外观→颜色→背景与时间→译文与翻译；右 字体→纯音乐→诊断→更新）
-    /// 或单列回落（左列序+右列序顺排）。卡序与阈值全在 Core.SettingsLayout，本方法只搬控件：
-    /// 先把八张卡从旧容器摘下，再按目标列序挂入对应列面板。模式未变时直接返回。
+    /// v0.8.2 卡片排布：双列时把八张卡放进 **2 列 × 4 行** 的 Grid 方格——行高取同行
+    /// 两卡的较高者（行定义 Auto + 卡片 VerticalAlignment=Stretch 拉伸填满），
+    /// 同行左右严格等高、方方正正；单列回落按网格阅读序顺排（StackPanel）。
+    /// 行列序全在 Core.SettingsLayout，本方法只搬控件；模式未变时直接返回。
+    /// 网格整体仍装在外层 ScrollViewer 里：窗口被拉矮/内容超高时滚动兜底，卡不被压坏。
     /// </summary>
-    private void ApplyCardLayout(bool twoCol)
+    private void ApplyCardLayout(bool grid)
     {
-        if (_twoColMode == twoCol) return;
-        _twoColMode = twoCol;
+        if (_gridMode == grid) return;
+        _gridMode = grid;
         foreach (var card in _cardsById.Values)
             (card.Parent as Panel)?.Children.Remove(card);
         _cardsHost.Children.Clear();
         _cardsHost.ColumnDefinitions.Clear();
-        _colLeft.Children.Clear();
-        _colRight.Children.Clear();
+        _cardsHost.RowDefinitions.Clear();
         _singlePanel.Children.Clear();
-        if (twoCol)
+        if (grid)
         {
             _cardsHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             _cardsHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            _colRight.Margin = new Thickness(SettingsLayout.ColumnGap, 0, 0, 0);
-            foreach (string id in SettingsLayout.LeftColumn) _colLeft.Children.Add(_cardsById[id]);
-            foreach (string id in SettingsLayout.RightColumn) _colRight.Children.Add(_cardsById[id]);
-            Grid.SetColumn(_colLeft, 0);
-            Grid.SetColumn(_colRight, 1);
-            _cardsHost.Children.Add(_colLeft);
-            _cardsHost.Children.Add(_colRight);
+            for (int r = 0; r < SettingsLayout.GridRows.Length; r++)
+            {
+                _cardsHost.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                string[] row = SettingsLayout.GridRows[r];
+                for (int c = 0; c < row.Length; c++)
+                {
+                    var card = _cardsById[row[c]];
+                    bool lastRow = r == SettingsLayout.GridRows.Length - 1;
+                    card.Margin = new Thickness(
+                        c == 1 ? SettingsLayout.ColumnGap : 0, 0, 0,
+                        lastRow ? 0 : SettingsLayout.RowGap);
+                    card.VerticalAlignment = VerticalAlignment.Stretch;
+                    Grid.SetRow(card, r);
+                    Grid.SetColumn(card, c);
+                    _cardsHost.Children.Add(card);
+                }
+            }
         }
         else
         {
             _cardsHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            foreach (string id in SettingsLayout.SingleColumn) _singlePanel.Children.Add(_cardsById[id]);
+            foreach (string id in SettingsLayout.SingleColumn)
+            {
+                var card = _cardsById[id];
+                card.Margin = new Thickness(0, 0, 0, 10);
+                card.VerticalAlignment = VerticalAlignment.Stretch;
+                _singlePanel.Children.Add(card);
+            }
             Grid.SetColumn(_singlePanel, 0);
             _cardsHost.Children.Add(_singlePanel);
         }
@@ -670,9 +706,19 @@ public sealed class SettingsWindow : FluentWindow
         return new DataTemplate { VisualTree = tb };
     }
 
-    /// <summary>窗口位置记忆（原 ThemedWindow 同语义的最小实现）：有存档则定位，否则主屏居中；关窗时存当前坐标。</summary>
-    private void InitPositionMemory(double? savedX, double? savedY, Action<double, double> save)
+    /// <summary>
+    /// 窗口位置记忆（原 ThemedWindow 同语义的最小实现）：有存档则定位，否则主屏居中；关窗时存当前坐标。
+    /// v0.8.2：centerOnScreen 时强制居中且**不读不写**位置记忆——自动打开（启动/更新后）
+    /// 的居中展示是一次性的，不能把用户手动摆放的记忆位置冲掉。
+    /// </summary>
+    private void InitPositionMemory(double? savedX, double? savedY, Action<double, double> save,
+        bool centerOnScreen = false)
     {
+        if (centerOnScreen)
+        {
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            return;
+        }
         if (savedX is double x && savedY is double y)
         {
             WindowStartupLocation = WindowStartupLocation.Manual;
@@ -940,6 +986,8 @@ public sealed class SettingsWindow : FluentWindow
             _settings.RequestSave();
         }
         _autoStartSwitch.IsChecked = autoStart;
+        // v0.8.2：启动时打开设置页（纯设置项，无外部状态对齐）
+        _openOnStartupSwitch.IsChecked = _settings.OpenSettingsOnStartup;
         _syncingToken = true;
         _tokenPwd.Password = _settings.GithubToken;
         _tokenText.Text = _settings.GithubToken;
@@ -975,6 +1023,33 @@ public sealed class SettingsWindow : FluentWindow
     }
 
     public void SetUpdateStatus(string text) => _updateStatus.Text = text;
+
+    /// <summary>
+    /// v0.8.2：下载进度呈现——进度条 + 状态文案（已下载 MB / 总 MB · 百分比；
+    /// 总大小未知时进度条转不定量、文案只报已下载量）。文案口径在 Core.DownloadProgressText。
+    /// </summary>
+    public void SetUpdateProgress(long downloadedBytes, long totalBytes)
+    {
+        _updateProgress.Visibility = Visibility.Visible;
+        double pct = DownloadProgressText.Percent(downloadedBytes, totalBytes);
+        if (pct >= 0)
+        {
+            _updateProgress.IsIndeterminate = false;
+            _updateProgress.Value = pct;
+        }
+        else
+        {
+            _updateProgress.IsIndeterminate = true;
+        }
+        _updateStatus.Text = DownloadProgressText.Format(downloadedBytes, totalBytes);
+    }
+
+    /// <summary>v0.8.2：下载结束（成功/失败都算）后收起进度条，状态文案由调用方接管。</summary>
+    public void HideUpdateProgress()
+    {
+        _updateProgress.Visibility = Visibility.Collapsed;
+        _updateProgress.IsIndeterminate = false;
+    }
 
     /// <summary>有新版时：显示 Release 说明摘要（截断）与「立即更新」按钮。</summary>
     public void ShowUpdateAvailable(ReleaseInfo release)
