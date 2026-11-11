@@ -1,0 +1,82 @@
+name: Release
+
+# 打 tag（v*）即发版：云端编译主程序 + 更新助手 → 组装 zip → 建 Release 并上传
+# → 往 release-receipts 分支写回执（免批准核查发版结果，照 NOVA 的做法）。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish main app
+        shell: pwsh
+        run: dotnet publish app/SpotifyLyricsWin.csproj -c Release -r win-x64 --self-contained false -o publish
+
+      - name: Publish updater
+        shell: pwsh
+        run: dotnet publish app-updater/SpotifyLyricsUpdater.csproj -c Release -r win-x64 --self-contained false -o publish
+
+      - name: Assemble zip
+        shell: pwsh
+        run: |
+          $zip = "SpotifyLyricsWin-${{ github.ref_name }}.zip"
+          Compress-Archive -Path publish/* -DestinationPath $zip
+          "ZIP_NAME=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # Release 正文取 CHANGELOG.md 中该版本的小节（小节标题形如「## v0.4.0」）
+      - name: Extract changelog section
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          awk -v hdr="## $TAG" 'index($0, hdr) == 1 { p = 1; next } /^## / { if (p) exit } p { print }' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then echo "SpotifyLyricsWin $TAG" > release-notes.md; fi
+          cat release-notes.md
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" "$ZIP_NAME" \
+            --title "SpotifyLyricsWin ${{ github.ref_name }}" \
+            --notes-file release-notes.md
+
+      # 回执：{tag, asset, size, published_at} 写到 release-receipts 分支 receipts/<tag>.json
+      # 核查发版只需读这个文件（git 只读、免批准），分支不存在时 orphan 新建。
+      - name: Write release receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="${{ github.ref_name }}"
+          SIZE=$(stat -c %s "$ZIP_NAME")
+          PUBLISHED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          rm -rf receipt-work && mkdir receipt-work && cd receipt-work
+          git init -q
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          if git fetch -q origin release-receipts; then
+            git checkout -q -b release-receipts origin/release-receipts
+          else
+            git checkout -q --orphan release-receipts
+          fi
+          mkdir -p receipts
+          printf '{"tag":"%s","asset":"%s","size":%s,"published_at":"%s"}\n' \
+            "$TAG" "$ZIP_NAME" "$SIZE" "$PUBLISHED" > "receipts/$TAG.json"
+          git add "receipts/$TAG.json"
+          git commit -q -m "receipt: $TAG"
+          git push -q origin release-receipts

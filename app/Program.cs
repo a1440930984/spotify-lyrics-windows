@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 using SpotifyLyricsWin.Core;
@@ -31,15 +32,32 @@ public static class Program
     private static string _adKey = "";
     private static string _lastLogSignature = "\0";
 
+    // v0.4 自动更新
+    private static Application _app = null!;
+    private static ReleaseInfo? _pendingRelease;
+    private static string? _startupUpdateNote;
+
     [STAThread]
     public static void Main()
     {
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        _app = app;
 
         // v0.3：启动先落一行日志，保证 log.txt 必然存在（v0.2 只在广告命中时写，
         // 从未命中就没文件，用户找不到）。路径：%AppData%/SpotifyLyricsWin/log.txt
         AppLog.EnsureFile();
-        AppLog.Write("[启动] SpotifyLyricsWin v0.3 启动");
+        AppLog.Write("[启动] SpotifyLyricsWin v0.4 启动");
+
+        // v0.4：先看上次自动更新的结果（Updater 写的 update-result.json），汇报一次后删掉
+        var lastResult = UpdateService.ReadResult();
+        if (lastResult != null)
+        {
+            _startupUpdateNote = lastResult.Ok
+                ? $"已更新到 {lastResult.To}（{lastResult.Time} 完成）"
+                : $"上次更新没成功：{lastResult.Error}（详情看更新日志 {UpdateService.UpdaterLogPath}）";
+            AppLog.Write($"[自动更新] 上次结果：ok={lastResult.Ok} {lastResult.From} → {lastResult.To} {lastResult.Error}");
+            UpdateService.DeleteResult();
+        }
 
         _settings = Settings.Load();
         _tracker = new SmtcTracker();
@@ -78,11 +96,14 @@ public static class Program
             if (t != null && !_isAd) StartFetch(t, skipCache: true);
         };
         _tray.OpenLog += OpenLogFile;
+        _tray.BalloonClicked += OpenSettings;
         _tray.ExitApp += () =>
         {
             _tray.Dispose();
             app.Shutdown();
         };
+        if (_startupUpdateNote != null)
+            _tray.SetStatus("SpotifyLyrics - " + _startupUpdateNote);
 
         // SMTC 轮询：500ms
         var pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -132,6 +153,19 @@ public static class Program
         tick.Tick += (_, _) => OnTick();
         tick.Start();
 
+        // v0.4：启动后静默查一次更新（填了令牌才查；有新版才用气泡提醒，不弹窗打断听歌）
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(5000);
+            if (string.IsNullOrWhiteSpace(_settings.GithubToken)) return;
+            try
+            {
+                var result = await UpdateService.CheckLatestAsync(_settings.GithubToken);
+                Application.Current?.Dispatcher.Invoke(() => HandleCheckResult(result, manual: false));
+            }
+            catch { /* 静默检查失败不打扰用户 */ }
+        });
+
         app.Run();
     }
 
@@ -142,8 +176,112 @@ public static class Program
         // v0.2：设置实时生效——每次变更立刻重套悬浮窗样式（落盘由设置窗内的防抖处理）
         _settingsWindow.LiveChanged += () => _floating.ApplyStyle();
         _settingsWindow.OpenLogRequested += OpenLogFile;
+        // v0.4：更新检查/安装由主程序编排，结果推回设置窗
+        _settingsWindow.CheckUpdateRequested += async () =>
+        {
+            _settingsWindow?.SetUpdateStatus("正在检查更新…");
+            var r = await UpdateService.CheckLatestAsync(_settings.GithubToken);
+            HandleCheckResult(r, manual: true);
+        };
+        _settingsWindow.InstallUpdateRequested += RunInstallUpdate;
         _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+        if (_pendingRelease != null)
+        {
+            _settingsWindow.SetUpdateStatus(
+                $"发现新版 {_pendingRelease.TagName}（当前 v{UpdateService.CurrentVersion}）。点「立即更新」下载并自动换版。");
+            _settingsWindow.ShowUpdateAvailable(_pendingRelease);
+        }
+        else if (_startupUpdateNote != null)
+        {
+            _settingsWindow.SetUpdateStatus(_startupUpdateNote + $" 当前版本 v{UpdateService.CurrentVersion}。");
+        }
         _settingsWindow.Show();
+    }
+
+    /// <summary>v0.4：统一处理更新检查结果（静默/手动共用）。</summary>
+    private static void HandleCheckResult(UpdateCheckResult result, bool manual)
+    {
+        AppLog.Write($"[自动更新] 检查：{result.Kind} {result.Message}");
+        switch (result.Kind)
+        {
+            case UpdateCheckKind.UpdateAvailable:
+                _pendingRelease = result.Release;
+                if (_settingsWindow != null)
+                {
+                    _settingsWindow.SetUpdateStatus(result.Message + "。点「立即更新」下载并自动换版。");
+                    _settingsWindow.ShowUpdateAvailable(result.Release!);
+                }
+                else if (!manual)
+                {
+                    _tray.ShowBalloon("Spotify 歌词有新版",
+                        $"{result.Release!.TagName} 已发布，点这里打开设置更新");
+                }
+                _tray.SetStatus($"SpotifyLyrics - 发现新版 {result.Release!.TagName}");
+                break;
+            case UpdateCheckKind.UpToDate:
+                _pendingRelease = null;
+                _settingsWindow?.HideUpdateAvailable();
+                _settingsWindow?.SetUpdateStatus(result.Message);
+                break;
+            default: // NoToken / Failed
+                _settingsWindow?.SetUpdateStatus(result.Message);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// v0.4「立即更新」：下载 zip（带进度）→ 解压 staging → Updater 复制到临时目录并经 WMI
+    /// 脱钩拉起 → 主程序退出交接。拉起失败绝不退出，提示用户手动运行 Updater 兜底。
+    /// </summary>
+    private static async void RunInstallUpdate()
+    {
+        var release = _pendingRelease;
+        var win = _settingsWindow;
+        if (release?.ZipAsset == null)
+        {
+            win?.SetUpdateStatus("没有可安装的新版，请先点「检查更新」。");
+            return;
+        }
+        win?.SetInstallEnabled(false);
+        try
+        {
+            Directory.CreateDirectory(UpdateService.UpdateWorkDir);
+            // 先删旧助手日志：失败时用户打开的就是这一次的全新日志，不会和旧的混淆
+            try { if (File.Exists(UpdateService.UpdaterLogPath)) File.Delete(UpdateService.UpdaterLogPath); } catch { }
+
+            var progress = new Progress<double>(p => win?.SetUpdateStatus($"正在下载更新… {p:F0}%"));
+            await UpdateService.DownloadAssetAsync(_settings.GithubToken, release.ZipAsset,
+                UpdateService.DownloadedZipPath, progress);
+            win?.SetUpdateStatus("下载完成，正在准备更新…");
+
+            UpdateService.ExtractToStaging(UpdateService.DownloadedZipPath);
+            string stagedUpdater = UpdateService.StageUpdater(AppContext.BaseDirectory);
+            string appDir = AppContext.BaseDirectory.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string args = UpdateLauncher.BuildArguments(
+                Environment.ProcessId, UpdateService.StagingDir, appDir, "SpotifyLyricsWin.exe",
+                "v" + UpdateService.CurrentVersion, release.TagName,
+                UpdateService.ResultPath, UpdateService.UpdaterLogPath);
+
+            var (ok, how, error) = UpdateLauncher.LaunchDetached(stagedUpdater, args);
+            if (!ok)
+            {
+                win?.SetUpdateStatus(
+                    $"更新助手没能自动启动（{error}）。请手动运行一次：{stagedUpdater} {args}");
+                win?.SetInstallEnabled(true);
+                AppLog.Write($"[自动更新] 拉起 Updater 失败：{error}");
+                return;
+            }
+            AppLog.Write($"[自动更新] 已通过 {how} 拉起 Updater（目标 {release.TagName}），主程序退出交接");
+            _tray.Dispose();
+            _app.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            win?.SetUpdateStatus($"更新没能开始：{ex.Message} 可再点「立即更新」重试。");
+            win?.SetInstallEnabled(true);
+            AppLog.Write($"[自动更新] 下载/准备失败：{ex.Message}");
+        }
     }
 
     /// <summary>用记事本打开诊断日志（文件必然存在：启动时已 EnsureFile）。</summary>

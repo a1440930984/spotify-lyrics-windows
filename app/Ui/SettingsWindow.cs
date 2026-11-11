@@ -7,7 +7,7 @@ using SpotifyLyricsWin.Core;
 namespace SpotifyLyricsWin.Ui;
 
 /// <summary>
-/// 设置窗（v0.3 改版）：继承 ThemedWindow 自绘深色主题，标题「Spotify 歌词 · 设置 v0.3」。
+/// 设置窗（v0.3 改版、v0.4 加更新分区）：继承 ThemedWindow 自绘深色主题，标题「Spotify 歌词 · 设置 v0.4」。
 /// - **所有改动实时生效**：控件一变就写 Settings、通知主程序重套悬浮窗样式、防抖落盘；
 /// - v0.3 移除「完成」按钮：实时生效+自动存盘下它没有功能意义，关窗走标题栏 ✕；
 /// - 新增「打开日志」：诊断日志路径直接写在窗内（广告识别调规则靠它）。
@@ -37,6 +37,20 @@ public sealed class SettingsWindow : ThemedWindow
     public event Action? LiveChanged;
     /// <summary>点「打开日志」（主程序负责用记事本打开 log.txt）。</summary>
     public event Action? OpenLogRequested;
+    /// <summary>v0.4：点「检查更新」（主程序跑检查并把结果推回本窗）。</summary>
+    public event Action? CheckUpdateRequested;
+    /// <summary>v0.4：点「立即更新」（主程序下载、拉起 Updater 后退出本程序）。</summary>
+    public event Action? InstallUpdateRequested;
+
+    // v0.4 更新分区控件
+    private readonly PasswordBox _tokenPwd;
+    private readonly TextBox _tokenText;
+    private readonly Button _tokenEye;
+    private bool _tokenShown;
+    private bool _syncingToken;
+    private readonly TextBlock _updateStatus;
+    private readonly TextBlock _releaseNotes;
+    private readonly Button _installBtn;
 
     private static readonly string[] Presets = ColorPickerWindow.Presets;
 
@@ -56,7 +70,7 @@ public sealed class SettingsWindow : ThemedWindow
         }
     }
 
-    public SettingsWindow(Settings settings) : base("Spotify 歌词 · 设置 v0.3", showMinimize: true)
+    public SettingsWindow(Settings settings) : base("Spotify 歌词 · 设置 v0.4", showMinimize: true)
     {
         _settings = settings;
         Width = 460;
@@ -179,6 +193,89 @@ public sealed class SettingsWindow : ThemedWindow
         _mxmKey = new TextBox { Margin = new Thickness(0, 4, 0, 0) };
         _mxmKey.TextChanged += (_, _) => OnChanged(() => _settings.MusixmatchApiKey = _mxmKey.Text.Trim());
         panel.Children.Add(_mxmKey);
+
+        // ===== 更新（v0.4）：私有仓 + 只读令牌，令牌只存本机 =====
+        panel.Children.Add(new TextBlock
+        {
+            Text = "自动更新（GitHub 私有仓库）",
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 14, 0, 0)
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "仓库是私有的，检查更新需要一枚只读令牌：GitHub → Settings → Developer settings → " +
+                   "Fine-grained tokens，只选 spotify-lyrics-windows 仓库、Contents 只读即可。" +
+                   "令牌只填在本机这里、只存本机，不用发到聊天里。",
+            Foreground = Theme.SubTextBrush,
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 2, 0, 0)
+        });
+        var tokenRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+        _tokenPwd = new PasswordBox
+        {
+            Width = 300,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Background = Theme.PanelBrush,
+            Foreground = Theme.TextBrush,
+            BorderBrush = Theme.BorderBrush
+        };
+        _tokenText = new TextBox
+        {
+            Width = 300,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed
+        };
+        _tokenEye = new Button { Content = "显示", Width = 56, Height = 28, Margin = new Thickness(6, 0, 0, 0) };
+        _tokenPwd.PasswordChanged += (_, _) =>
+        {
+            if (_syncingToken || _tokenShown) return;
+            OnChanged(() => _settings.GithubToken = _tokenPwd.Password.Trim());
+        };
+        _tokenText.TextChanged += (_, _) =>
+        {
+            if (_syncingToken || !_tokenShown) return;
+            OnChanged(() => _settings.GithubToken = _tokenText.Text.Trim());
+        };
+        _tokenEye.Click += (_, _) => ToggleTokenVisibility();
+        tokenRow.Children.Add(_tokenPwd);
+        tokenRow.Children.Add(_tokenText);
+        tokenRow.Children.Add(_tokenEye);
+        panel.Children.Add(tokenRow);
+
+        _updateStatus = new TextBlock
+        {
+            Foreground = Theme.SubTextBrush,
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0)
+        };
+        panel.Children.Add(_updateStatus);
+        _releaseNotes = new TextBlock
+        {
+            Foreground = Theme.SubTextBrush,
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0),
+            Visibility = Visibility.Collapsed
+        };
+        panel.Children.Add(_releaseNotes);
+        var updateBtnRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 0) };
+        var checkBtn = new Button { Content = "检查更新", Height = 30, Width = 110, Margin = new Thickness(0, 0, 8, 0) };
+        checkBtn.Click += (_, _) => CheckUpdateRequested?.Invoke();
+        _installBtn = new Button
+        {
+            Content = "立即更新",
+            Height = 30,
+            Width = 110,
+            Visibility = Visibility.Collapsed,
+            Background = Theme.AccentBrush,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x06, 0x21, 0x0F))
+        };
+        _installBtn.Click += (_, _) => InstallUpdateRequested?.Invoke();
+        updateBtnRow.Children.Add(checkBtn);
+        updateBtnRow.Children.Add(_installBtn);
+        panel.Children.Add(updateBtnRow);
 
         // 诊断日志（v0.3）：广告没识别出来时，把广告时段的日志行发回来调规则
         panel.Children.Add(new TextBlock
@@ -349,8 +446,59 @@ public sealed class SettingsWindow : ThemedWindow
         _textRow.Hex = _settings.TextColorHex;
         _fontCombo.SelectedItem = _settings.FontFamily;
         _mxmKey.Text = _settings.MusixmatchApiKey;
+        _syncingToken = true;
+        _tokenPwd.Password = _settings.GithubToken;
+        _tokenText.Text = _settings.GithubToken;
+        _syncingToken = false;
         RefreshOffset();
+        SetUpdateStatus(string.IsNullOrWhiteSpace(_settings.GithubToken)
+            ? $"当前版本 v{UpdateService.CurrentVersion}。填只读令牌后可用自动更新。"
+            : $"当前版本 v{UpdateService.CurrentVersion}。启动时会自动查一次，也可点「检查更新」。");
     }
+
+    // ---------- v0.4 更新分区（供主程序推状态回来） ----------
+
+    private void ToggleTokenVisibility()
+    {
+        _tokenShown = !_tokenShown;
+        _syncingToken = true;
+        if (_tokenShown)
+        {
+            _tokenText.Text = _tokenPwd.Password;
+            _tokenText.Visibility = Visibility.Visible;
+            _tokenPwd.Visibility = Visibility.Collapsed;
+            _tokenEye.Content = "隐藏";
+        }
+        else
+        {
+            _tokenPwd.Password = _tokenText.Text;
+            _tokenPwd.Visibility = Visibility.Visible;
+            _tokenText.Visibility = Visibility.Collapsed;
+            _tokenEye.Content = "显示";
+        }
+        _syncingToken = false;
+    }
+
+    public void SetUpdateStatus(string text) => _updateStatus.Text = text;
+
+    /// <summary>有新版时：显示 Release 说明摘要（截断）与「立即更新」按钮。</summary>
+    public void ShowUpdateAvailable(ReleaseInfo release)
+    {
+        string body = (release.Body ?? "").Trim();
+        if (body.Length > 300) body = body.Substring(0, 300) + "…";
+        _releaseNotes.Text = body;
+        _releaseNotes.Visibility = body.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _installBtn.Visibility = Visibility.Visible;
+        _installBtn.IsEnabled = true;
+    }
+
+    public void HideUpdateAvailable()
+    {
+        _installBtn.Visibility = Visibility.Collapsed;
+        _releaseNotes.Visibility = Visibility.Collapsed;
+    }
+
+    public void SetInstallEnabled(bool enabled) => _installBtn.IsEnabled = enabled;
 
     /// <summary>统一成 #AARRGGBB（6 位补 FF alpha；颜色强制不透明，照安卓颜色盘规则）</summary>
     private static string NormalizeHex(string hex)

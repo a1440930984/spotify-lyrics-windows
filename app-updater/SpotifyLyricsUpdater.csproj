@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 独立更新小助手：主程序退出后把 staging 的新版文件覆盖到安装目录再重启主程序。
+       纯 BCL（文件 IO + 进程等待），目标框架用普通 net8.0（不依赖 WPF/WinRT），
+       本机 Linux 也能直接跑起来做覆盖逻辑实测；发布时 -r win-x64 出 exe。
+       WinExe = 无控制台窗口（静默运行，只写日志）。 -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>SpotifyLyricsUpdater</AssemblyName>
+    <RootNamespace>SpotifyLyricsUpdater</RootNamespace>
+    <Version>0.4.0</Version>
+  </PropertyGroup>
+
+</Project>

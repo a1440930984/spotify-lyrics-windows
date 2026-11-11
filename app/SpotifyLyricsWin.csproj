@@ -10,9 +10,15 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>SpotifyLyricsWin</AssemblyName>
     <RootNamespace>SpotifyLyricsWin</RootNamespace>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <!-- v0.4：WMI Win32_Process.Create 脱钩拉起更新助手（System.Management 官方包）；
+       拉起失败还有 PowerShell/CIM 兜底（Core/UpdateLauncher） -->
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
 
   <!-- 图标同时随输出复制一份到根目录（Link 决定输出相对路径）：
        托盘与各窗口在运行时从 exe 目录加载同一份 app.ico -->

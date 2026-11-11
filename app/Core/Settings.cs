@@ -21,6 +21,12 @@ public sealed class Settings
     public double? FloatingY { get; set; }
     public string FontFamily { get; set; } = "Microsoft YaHei UI"; // 新增项：字体选择
     public string MusixmatchApiKey { get; set; } = "";
+    /// <summary>
+    /// v0.4 新增：GitHub 只读令牌（fine-grained，仅 spotify-lyrics-windows 仓、Contents 只读）。
+    /// 仅用于检查/下载本仓库的 Release 做自动更新，只存本机 settings.json，绝不外传。
+    /// 留空 = 不检查更新。
+    /// </summary>
+    public string GithubToken { get; set; } = "";
     /// <summary>v0.2 新增：锁定悬浮窗位置（锁定后不可拖动）</summary>
     public bool PositionLocked { get; set; } = false;
     /// <summary>v0.2 新增：单行模式（仅当前行；双行 = 当前行 + 下一行）</summary>

@@ -16,15 +16,18 @@ public sealed class Tray : IDisposable
     public event Action? RefetchLyrics;
     public event Action? OpenLog;
     public event Action? ExitApp;
+    /// <summary>v0.4：托盘气泡被点击（用于「发现新版」气泡 → 打开设置）。</summary>
+    public event Action? BalloonClicked;
 
     public Tray()
     {
         _icon = new NotifyIcon
         {
             Icon = LoadIcon(),
-            Text = "SpotifyLyrics 悬浮歌词 v0.3",
+            Text = "SpotifyLyrics 悬浮歌词 v0.4",
             Visible = true
         };
+        _icon.BalloonTipClicked += (_, _) => BalloonClicked?.Invoke();
         var menu = new ContextMenuStrip();
         menu.Items.Add("显示/隐藏歌词", null, (_, _) => ToggleFloating?.Invoke());
         menu.Items.Add("设置…", null, (_, _) => OpenSettings?.Invoke());
@@ -53,6 +56,13 @@ public sealed class Tray : IDisposable
     {
         // NotifyIcon.Text 上限 63 字符
         _icon.Text = text.Length > 63 ? text.Substring(0, 63) : text;
+    }
+
+    /// <summary>v0.4：托盘气泡（如「发现新版」；不弹窗、不打断听歌，点气泡打开设置）。</summary>
+    public void ShowBalloon(string title, string text)
+    {
+        try { _icon.ShowBalloonTip(8000, title, text, ToolTipIcon.Info); }
+        catch { /* 气泡失败不影响主流程 */ }
     }
 
     /// <summary>运行时画一个托盘图标：Spotify 绿圆 + 白色音符。</summary>
