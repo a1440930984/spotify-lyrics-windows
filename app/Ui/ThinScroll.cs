@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Markup;
 using System.Xml;
 
@@ -96,13 +97,13 @@ public static class ThinScroll
                                Orientation="Vertical" Minimum="0"
                                Maximum="{TemplateBinding ScrollableHeight}"
                                ViewportSize="{TemplateBinding ViewportHeight}"
-                               Value="{Binding VerticalOffset, RelativeSource={RelativeSource TemplatedParent}}"
+                               Value="{Binding VerticalOffset, Mode=OneWay, RelativeSource={RelativeSource TemplatedParent}}"
                                Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
                     <ScrollBar x:Name="PART_HorizontalScrollBar" Grid.Column="0" Grid.Row="1"
                                Orientation="Horizontal" Minimum="0"
                                Maximum="{TemplateBinding ScrollableWidth}"
                                ViewportSize="{TemplateBinding ViewportWidth}"
-                               Value="{Binding HorizontalOffset, RelativeSource={RelativeSource TemplatedParent}}"
+                               Value="{Binding HorizontalOffset, Mode=OneWay, RelativeSource={RelativeSource TemplatedParent}}"
                                Visibility="{TemplateBinding ComputedHorizontalScrollBarVisibility}"/>
                   </Grid>
                 </ControlTemplate>
@@ -124,11 +125,26 @@ public static class ThinScroll
         {
             using var sr = new StringReader(DictXaml);
             using var xr = XmlReader.Create(sr);
-            _cached = (ResourceDictionary)XamlReader.Load(xr);
+            var dict = (ResourceDictionary)XamlReader.Load(xr);
+            // 应用期自检（v0.5.1）：XamlReader 只验「解析得通」，绑定类错误（如对只读
+            // 属性 TwoWay 绑定）要到窗口套模板时才炸——v0.5 设置窗就这么崩过一次。
+            // 先拿一个离屏 ScrollViewer 把模板真套一遍：炸了就整体回退系统滚动条，
+            // 保证这类问题永远只是「滚动条不好看」，不会变成「窗口打不开」。
+            var probe = new ScrollViewer
+            {
+                Content = new Border { Height = 1000, Width = 200 },
+                Height = 100,
+                Width = 100,
+                Style = dict[typeof(ScrollViewer)] as Style
+            };
+            probe.Measure(new Size(100, 100));
+            probe.Arrange(new Rect(0, 0, 100, 100));
+            probe.ApplyTemplate();
+            _cached = dict;
         }
         catch
         {
-            _cached = null; // 模板装配失败不许连累窗口打开：回退系统滚动条
+            _cached = null; // 模板装配/应用失败不许连累窗口打开：回退系统滚动条
         }
         return _cached;
     }
