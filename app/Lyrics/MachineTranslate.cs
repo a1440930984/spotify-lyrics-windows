@@ -38,9 +38,20 @@ public static class MachineTranslate
     /// 逐行机翻。输入原文行（与歌词行同序），输出同长列表（翻不出的行是空串）；
     /// 一行都没翻出来返回 null。空行原样留空、不发请求。
     /// </summary>
+    public static Task<List<string>?> TranslateLinesAsync(
+        IReadOnlyList<string> lines, CancellationToken ct) =>
+        TranslateLinesAsync(lines, ct, TranslateConfig.Default);
+
+    /// <summary>
+    /// v0.8：带翻译服务配置的入口——路由（选定服务优先、失败回落自动链）在
+    /// TranslateChunkAsync 里按批生效，批量分行策略与无配置版完全一致。
+    /// </summary>
     public static async Task<List<string>?> TranslateLinesAsync(
-        IReadOnlyList<string> lines, CancellationToken ct)
+        IReadOnlyList<string> lines, CancellationToken ct, TranslateConfig cfg)
     {
+        if (TranslateRouter.SelectedButUnusable(cfg))
+            AppLog.WriteLimited("mt-nocred",
+                $"[机翻] 已选翻译服务「{cfg.Service}」但凭据未填齐，本次回落自动链（Google→MyMemory）", 60_000);
         var result = new string[lines.Count];
         Array.Fill(result, "");
         var todo = new List<int>();
@@ -75,7 +86,7 @@ public static class MachineTranslate
             firstRequest = false;
 
             string joined = string.Join("\n", chunk.Select(i => lines[i]));
-            string? translated = await TranslateChunkAsync(joined, ct);
+            string? translated = await TranslateChunkAsync(joined, ct, cfg);
             List<string>? parts = translated == null ? null
                 : translated.Replace("\r\n", "\n").Split('\n').Select(s => s.Trim()).ToList();
             if (parts != null && parts.Count == chunk.Count)
@@ -94,7 +105,7 @@ public static class MachineTranslate
             {
                 ct.ThrowIfCancellationRequested();
                 await Task.Delay(150, ct);
-                string? one = await TranslateChunkAsync(lines[idx], ct);
+                string? one = await TranslateChunkAsync(lines[idx], ct, cfg);
                 if (!string.IsNullOrWhiteSpace(one))
                 {
                     result[idx] = one.Trim();
@@ -106,13 +117,44 @@ public static class MachineTranslate
         return result.ToList();
     }
 
-    /// <summary>翻一段文本：先 Google gtx，失败/为空再 MyMemory；都失败返回 null。</summary>
-    private static async Task<string?> TranslateChunkAsync(string text, CancellationToken ct)
+    /// <summary>
+    /// 翻一段文本（v0.8 路由）：先按用户选定的服务（TranslateRouter.PickPrimary）翻，
+    /// 失败/为空再回落自动链（Google gtx → MyMemory，v0.7 现行链）；自动链里会跳过
+    /// 刚刚已经失败过的那一家，免得白等一次超时。都失败返回 null。
+    /// </summary>
+    private static async Task<string?> TranslateChunkAsync(
+        string text, CancellationToken ct, TranslateConfig cfg)
     {
-        string? viaGoogle = await TryGoogleGtxAsync(text, ct);
-        if (!string.IsNullOrWhiteSpace(viaGoogle)) return viaGoogle;
-        string? viaMm = await TryMyMemoryAsync(text, ct);
-        if (!string.IsNullOrWhiteSpace(viaMm)) return viaMm;
+        string primary = TranslateRouter.PickPrimary(cfg);
+        string? hit = primary switch
+        {
+            TranslateServiceIds.Baidu =>
+                await BaiduTranslateApi.TranslateAsync(cfg.BaiduAppId, cfg.BaiduKey, text, ct),
+            TranslateServiceIds.Youdao =>
+                await YoudaoTranslateApi.TranslateAsync(cfg.YoudaoAppId, cfg.YoudaoKey, text, ct),
+            TranslateServiceIds.Microsoft =>
+                await MicrosoftTranslateApi.TranslateAsync(cfg.MsKey, cfg.MsRegion, text, ct),
+            TranslateServiceIds.MyMemory =>
+                await TryMyMemoryAsync(text, ct, cfg.MyMemoryEmail),
+            TranslateServiceIds.Google =>
+                await TryGoogleGtxAsync(text, ct),
+            _ => null
+        };
+        if (!string.IsNullOrWhiteSpace(hit)) return hit;
+        if (primary != TranslateServiceIds.Auto)
+            AppLog.WriteLimited("mt-fallback",
+                $"[机翻] 选定服务「{primary}」未出结果，本批回落自动链", 30_000);
+
+        if (primary != TranslateServiceIds.Google)
+        {
+            string? viaGoogle = await TryGoogleGtxAsync(text, ct);
+            if (!string.IsNullOrWhiteSpace(viaGoogle)) return viaGoogle;
+        }
+        if (primary != TranslateServiceIds.MyMemory)
+        {
+            string? viaMm = await TryMyMemoryAsync(text, ct, cfg.MyMemoryEmail);
+            if (!string.IsNullOrWhiteSpace(viaMm)) return viaMm;
+        }
         return null;
     }
 
@@ -149,10 +191,13 @@ public static class MachineTranslate
     }
 
     /// <summary>MyMemory：responseData.translatedText，responseStatus 须为 200。</summary>
-    public static async Task<string?> TryMyMemoryAsync(string text, CancellationToken ct)
+    public static Task<string?> TryMyMemoryAsync(string text, CancellationToken ct) =>
+        TryMyMemoryAsync(text, ct, "");
+
+    /// <summary>v0.8：带 de 邮箱（额度 5000→50000 字符/日，见 MyMemoryApi.BuildUrl）。</summary>
+    public static async Task<string?> TryMyMemoryAsync(string text, CancellationToken ct, string? email)
     {
-        string url = "https://api.mymemory.translated.net/get?q=" + HttpHelp.Enc(text)
-            + "&langpair=autodetect|zh-CN";
+        string url = MyMemoryApi.BuildUrl(text, email);
         string? resp = await HttpHelp.GetStringAsync(url, ct, timeoutSec: 10);
         if (string.IsNullOrWhiteSpace(resp)) return null;
         return ParseMyMemory(resp);

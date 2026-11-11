@@ -5,6 +5,7 @@ using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
 using SpotifyLyricsWin.Core;
+using SpotifyLyricsWin.Lyrics;
 using Wpf.Ui.Controls;
 using Button = Wpf.Ui.Controls.Button;
 using ComboBox = System.Windows.Controls.ComboBox;
@@ -48,7 +49,21 @@ public sealed class SettingsWindow : FluentWindow
     private readonly ComboBox _themeCombo;
     private readonly TextBox _mxmKey;
     private readonly TextBlock _marksCount;
-    private readonly ListBox _marksList;
+    // v0.8 新增控件（译文与翻译卡 / 诊断与缓存卡 / 更新与启动卡）
+    private readonly ComboBox _transServiceCombo;
+    private readonly TextBox _mmEmail;
+    private readonly TextBox _baiduId;
+    private readonly TextBox _baiduKey;
+    private readonly TextBox _youdaoId;
+    private readonly TextBox _youdaoKey;
+    private readonly TextBox _msKey;
+    private readonly TextBox _msRegion;
+    private readonly StackPanel _credBaidu;
+    private readonly StackPanel _credYoudao;
+    private readonly StackPanel _credMs;
+    private readonly TextBlock _cacheText;
+    private readonly ToggleSwitch _autoStartSwitch;
+    private InstrumentalListWindow? _marksWindow;
     private bool _loading = true;
 
     /// <summary>任意设置变化（主程序据此重套悬浮窗样式；持久化走 Settings.RequestSave 防抖）。</summary>
@@ -83,6 +98,17 @@ public sealed class SettingsWindow : FluentWindow
         ("spotify-dark", "Spotify 深色"),
         ("pure-black", "纯黑（OLED）"),
         ("deep-blue", "深蓝")
+    };
+
+    /// <summary>翻译服务下拉项：显示名 + 服务 id（v0.8；id 见 Lyrics.TranslateServiceIds）。</summary>
+    private static readonly (string Id, string Display)[] TranslateChoices =
+    {
+        (TranslateServiceIds.Auto, "自动（Google → MyMemory）"),
+        (TranslateServiceIds.MyMemory, "MyMemory"),
+        (TranslateServiceIds.Google, "Google 翻译"),
+        (TranslateServiceIds.Baidu, "百度翻译（需自备 key）"),
+        (TranslateServiceIds.Youdao, "有道智云（需自备 key）"),
+        (TranslateServiceIds.Microsoft, "微软翻译（需自备 key）")
     };
 
     /// <summary>字体下拉项：存真实字体名 Source，显示本地化名 Display，并以自身字体渲染。</summary>
@@ -125,14 +151,15 @@ public sealed class SettingsWindow : FluentWindow
     public SettingsWindow(Settings settings)
     {
         _settings = settings;
-        Title = "Spotify 歌词 · 设置 v0.7";
+        // v0.8：版本号动态取程序集版本，别再硬编码（旧标题里写死过旧版号）
+        Title = $"Spotify 歌词 · 设置 v{UpdateService.CurrentVersion}";
         Width = 500;
         Height = 760;
         MinWidth = 440;
         MinHeight = 480;
         ResizeMode = ResizeMode.CanResizeWithGrip;
         ExtendsContentIntoTitleBar = true;
-        // v0.7：纯黑/深蓝两套关 Mica（系统材质不吃背景覆写，两套会被罩成一个样），其余保留 Mica
+        // 深色三套全关 Mica（系统材质不吃背景覆写，几套会被罩成一个样，见 Theme.Backdrop），浅色保留
         WindowBackdropType = Theme.Backdrop;
 
         var root = new Grid();
@@ -143,6 +170,8 @@ public sealed class SettingsWindow : FluentWindow
             Title = "Spotify 歌词 · 设置",
             ShowMaximize = false
         };
+        WindowIcon.Apply(this);
+        if (WindowIcon.LoadImageSource() is { } iconSrc) titleBar.Icon = new ImageIcon { Source = iconSrc };
         Grid.SetRow(titleBar, 0);
         root.Children.Add(titleBar);
 
@@ -177,14 +206,6 @@ public sealed class SettingsWindow : FluentWindow
 
         _wordByWord = AddSwitchRow(look, "平滑逐字高亮（渐变扫光）",
             v => { _settings.WordByWordEnabled = v; AppLog.WriteLimited("set-wordbyword", $"[设置] 逐字扫光 = {v}", 5000); });
-        _showTrans = AddSwitchRow(look, "显示译文（歌词源带译文时）",
-            v => { _settings.ShowTranslation = v; AppLog.WriteLimited("set-showtrans", $"[设置] 显示译文 = {v}", 5000); });
-        _simpSwitch = AddSwitchRow(look, "繁体转简体显示（原文与自带译文，只转显示不改原文）",
-            v => { _settings.ConvertTradToSimp = v; AppLog.WriteLimited("set-simp", $"[设置] 繁体转简体 = {v}", 5000); });
-        _autoTransSwitch = AddSwitchRow(look, "无译文时自动翻译成中文（机器翻译，所有语种）",
-            v => { _settings.AutoTranslate = v; AppLog.WriteLimited("set-autotrans", $"[设置] 无译文自动翻译 = {v}", 5000); });
-        _lockSwitch = AddSwitchRow(look, "锁定悬浮窗位置（锁定后拖不动）",
-            v => _settings.PositionLocked = v);
 
         look.Children.Add(new TextBlock { Text = "显示行数", Margin = new Thickness(0, 10, 0, 0), FontSize = 13.5 });
         var lineRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 6, 0, 4) };
@@ -208,15 +229,126 @@ public sealed class SettingsWindow : FluentWindow
                 OnChanged(() => _settings.FontSize = (int)Math.Round(v));
         };
         look.Children.Add(_fontSizeBox);
+        _lockSwitch = AddSwitchRow(look, "锁定悬浮窗位置（锁定后拖不动）",
+            v => _settings.PositionLocked = v);
 
-        // ===== 卡片 2：颜色 =====
+        // ===== 卡片 2：译文与翻译（v0.8 新卡：译文相关从「外观与逐字」拆出独立成卡） =====
+        var transBody = CardPanel(panel, "译文与翻译");
+        _showTrans = AddSwitchRow(transBody, "显示译文（歌词源带译文时）",
+            v => { _settings.ShowTranslation = v; AppLog.WriteLimited("set-showtrans", $"[设置] 显示译文 = {v}", 5000); });
+        _simpSwitch = AddSwitchRow(transBody, "繁体转简体显示（原文与自带译文，只转显示不改原文）",
+            v => { _settings.ConvertTradToSimp = v; AppLog.WriteLimited("set-simp", $"[设置] 繁体转简体 = {v}", 5000); });
+        _autoTransSwitch = AddSwitchRow(transBody, "无译文时自动翻译成中文（机器翻译，所有语种）",
+            v => { _settings.AutoTranslate = v; AppLog.WriteLimited("set-autotrans", $"[设置] 无译文自动翻译 = {v}", 5000); });
+
+        transBody.Children.Add(new TextBlock { Text = "翻译服务", FontSize = 13.5, Margin = new Thickness(0, 10, 0, 0) });
+        _transServiceCombo = new ComboBox { Margin = new Thickness(0, 6, 0, 4) };
+        foreach (var (id, display) in TranslateChoices)
+            _transServiceCombo.Items.Add(new ComboBoxItem { Content = display, Tag = id });
+        GuardWheel(_transServiceCombo);
+        _transServiceCombo.SelectionChanged += (_, _) =>
+        {
+            if (_transServiceCombo.SelectedItem is ComboBoxItem item && item.Tag is string id)
+                OnChanged(() =>
+                {
+                    _settings.TranslateService = id;
+                    AppLog.WriteLimited("set-transsvc", $"[设置] 翻译服务 = {id}", 5000);
+                }, UpdateCredVisibility);
+        };
+        transBody.Children.Add(_transServiceCombo);
+        transBody.Children.Add(new TextBlock
+        {
+            Text = "「自动」= Google 免费通道、失败自动切 MyMemory。选了单个服务会优先用它，" +
+                   "失败自动回落这条自动链——不会因为选了路反而翻不出来。百度 / 有道 / 微软需自备免费 key，只存本机。",
+            Foreground = Theme.SubTextBrush, FontSize = 11.5, TextWrapping = TextWrapping.Wrap
+        });
+
+        transBody.Children.Add(new TextBlock
+        {
+            Text = "MyMemory 邮箱（可选）", FontSize = 13.5, Margin = new Thickness(0, 12, 0, 0)
+        });
+        _mmEmail = new TextBox { Margin = new Thickness(0, 6, 0, 0) };
+        _mmEmail.TextChanged += (_, _) => OnChanged(() => _settings.MyMemoryEmail = _mmEmail.Text.Trim());
+        transBody.Children.Add(_mmEmail);
+        transBody.Children.Add(new TextBlock
+        {
+            Text = "仅用于提高 MyMemory 翻译额度（匿名每天 5000 字符 → 填邮箱 50000 字符）：随翻译请求以 de 参数发给 MyMemory，不做他用；留空则匿名。",
+            Foreground = Theme.SubTextBrush, FontSize = 11.5, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+
+        // 凭据区：按选中的服务动态显示对应一组（UpdateCredVisibility 控制）
+        _credBaidu = new StackPanel { Margin = new Thickness(0, 4, 0, 0) };
+        _credBaidu.Children.Add(new TextBlock { Text = "百度 APP ID", FontSize = 12.5 });
+        _baiduId = new TextBox { Margin = new Thickness(0, 4, 0, 0) };
+        _baiduId.TextChanged += (_, _) => OnChanged(() => _settings.BaiduAppId = _baiduId.Text.Trim());
+        _credBaidu.Children.Add(_baiduId);
+        _credBaidu.Children.Add(new TextBlock { Text = "百度密钥", FontSize = 12.5, Margin = new Thickness(0, 8, 0, 0) });
+        _baiduKey = new TextBox { Margin = new Thickness(0, 4, 0, 0) };
+        _baiduKey.TextChanged += (_, _) => OnChanged(() => _settings.BaiduKey = _baiduKey.Text.Trim());
+        _credBaidu.Children.Add(_baiduKey);
+        _credBaidu.Children.Add(new TextBlock
+        {
+            Text = "申请处：百度翻译开放平台 fanyi-api.baidu.com → 开发者中心创建应用（通用翻译 API），有免费额度。",
+            Foreground = Theme.SubTextBrush, FontSize = 11.5, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        transBody.Children.Add(_credBaidu);
+
+        _credYoudao = new StackPanel { Margin = new Thickness(0, 4, 0, 0) };
+        _credYoudao.Children.Add(new TextBlock { Text = "有道应用 ID", FontSize = 12.5 });
+        _youdaoId = new TextBox { Margin = new Thickness(0, 4, 0, 0) };
+        _youdaoId.TextChanged += (_, _) => OnChanged(() => _settings.YoudaoAppId = _youdaoId.Text.Trim());
+        _credYoudao.Children.Add(_youdaoId);
+        _credYoudao.Children.Add(new TextBlock { Text = "有道应用密钥", FontSize = 12.5, Margin = new Thickness(0, 8, 0, 0) });
+        _youdaoKey = new TextBox { Margin = new Thickness(0, 4, 0, 0) };
+        _youdaoKey.TextChanged += (_, _) => OnChanged(() => _settings.YoudaoKey = _youdaoKey.Text.Trim());
+        _credYoudao.Children.Add(_youdaoKey);
+        _credYoudao.Children.Add(new TextBlock
+        {
+            Text = "申请处：有道智云 ai.youdao.com → 创建应用并绑定「文本翻译」服务，新用户有体验额度。",
+            Foreground = Theme.SubTextBrush, FontSize = 11.5, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        transBody.Children.Add(_credYoudao);
+
+        _credMs = new StackPanel { Margin = new Thickness(0, 4, 0, 0) };
+        _credMs.Children.Add(new TextBlock { Text = "微软翻译密钥", FontSize = 12.5 });
+        _msKey = new TextBox { Margin = new Thickness(0, 4, 0, 0) };
+        _msKey.TextChanged += (_, _) => OnChanged(() => _settings.MsTranslatorKey = _msKey.Text.Trim());
+        _credMs.Children.Add(_msKey);
+        _credMs.Children.Add(new TextBlock { Text = "微软区域（可留空 = 全球端点）", FontSize = 12.5, Margin = new Thickness(0, 8, 0, 0) });
+        _msRegion = new TextBox { Margin = new Thickness(0, 4, 0, 0) };
+        _msRegion.TextChanged += (_, _) => OnChanged(() => _settings.MsTranslatorRegion = _msRegion.Text.Trim());
+        _credMs.Children.Add(_msRegion);
+        _credMs.Children.Add(new TextBlock
+        {
+            Text = "申请处：Azure 门户创建「翻译」资源（F0 免费层每月 200 万字符），在「密钥和终结点」里拿密钥，区域填资源所在区域如 eastasia。",
+            Foreground = Theme.SubTextBrush, FontSize = 11.5, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        transBody.Children.Add(_credMs);
+
+        // ===== 卡片 3：颜色 =====
         var colorBody = CardPanel(panel, "颜色");
         _hiRow = BuildColorRow(colorBody, "当前行高亮颜色（已唱过的部分）", first: true,
             () => _settings.HighlightColorHex, v => _settings.HighlightColorHex = v);
         _textRow = BuildColorRow(colorBody, "其余文字颜色（未唱部分 / 下一行）", first: false,
             () => _settings.TextColorHex, v => _settings.TextColorHex = v);
+        // v0.8：恢复默认外观按钮挪进本卡末尾（原先单独吊在整窗最底部）；文案与逻辑不变
+        var reset = new Button { Content = "恢复默认外观（纯文字 + 绿色平滑逐字）", Height = 34, Margin = new Thickness(0, 12, 0, 0) };
+        reset.Click += (_, _) =>
+        {
+            _loading = true;
+            _settings.ResetStyle();
+            LoadIntoControls();
+            _loading = false;
+            LiveChanged?.Invoke();
+            _settings.RequestSave();
+        };
+        colorBody.Children.Add(reset);
 
-        // ===== 卡片 3：背景与时间 =====
+        // ===== 卡片 4：背景与时间 =====
         var timeBody = CardPanel(panel, "背景与时间");
         timeBody.Children.Add(new TextBlock
         {
@@ -254,7 +386,7 @@ public sealed class SettingsWindow : FluentWindow
         offsetRow.Children.Add(_offsetValue);
         timeBody.Children.Add(offsetRow);
 
-        // ===== 卡片 4：字体与歌词源 =====
+        // ===== 卡片 5：字体与歌词源 =====
         var fontBody = CardPanel(panel, "字体与歌词源");
         fontBody.Children.Add(new TextBlock { Text = "字体（默认 Microsoft YaHei UI，列表显示中文名）", FontSize = 13.5 });
         _fontCombo = new ComboBox { Margin = new Thickness(0, 6, 0, 0), ItemTemplate = FontItemTemplate() };
@@ -287,8 +419,42 @@ public sealed class SettingsWindow : FluentWindow
         _mxmKey.TextChanged += (_, _) => OnChanged(() => _settings.MusixmatchApiKey = _mxmKey.Text.Trim());
         fontBody.Children.Add(_mxmKey);
 
-        // ===== 卡片 5：自动更新 =====
-        var upd = CardPanel(panel, "自动更新（GitHub）");
+        // ===== 卡片 6：纯音乐标记 =====
+        var marks = CardPanel(panel, "纯音乐标记（被标记的曲目不再取词）");
+        _marksCount = new TextBlock { Foreground = Theme.SubTextBrush, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        marks.Children.Add(_marksCount);
+        // v0.8：名单管理独立成窗（逐条移除 + 清空全部都在那边），本卡只留计数 + 入口按钮
+        var viewMarks = new Button { Content = "查看已标记歌曲…", Height = 30, Margin = new Thickness(0, 8, 0, 0) };
+        viewMarks.Click += (_, _) => OpenMarksWindow();
+        marks.Children.Add(viewMarks);
+
+        // ===== 卡片 7：诊断与缓存 =====
+        var logBody = CardPanel(panel, "诊断与缓存（日志 + 歌词缓存）");
+        logBody.Children.Add(new TextBlock
+        {
+            Text = AppLog.LogPath,
+            Foreground = Theme.SubTextBrush,
+            FontSize = 11.5,
+            TextWrapping = TextWrapping.Wrap
+        });
+        var logBtn = new Button { Content = "打开日志", Height = 32, Margin = new Thickness(0, 8, 0, 0) };
+        logBtn.Click += (_, _) => OpenLogRequested?.Invoke();
+        logBody.Children.Add(logBtn);
+        // v0.8：歌词缓存统计与清空（只删缓存文件，设置与纯音乐标记不在缓存目录、不受影响）
+        logBody.Children.Add(new TextBlock { Text = "歌词缓存", FontSize = 13.5, Margin = new Thickness(0, 14, 0, 0) });
+        _cacheText = new TextBlock { Foreground = Theme.SubTextBrush, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
+        logBody.Children.Add(_cacheText);
+        var clearCacheBtn = new Button { Content = "清空歌词缓存", Height = 30, Margin = new Thickness(0, 8, 0, 0) };
+        clearCacheBtn.Click += (_, _) =>
+        {
+            int removed = CacheStats.Clear(Settings.CacheDir);
+            AppLog.Write($"[缓存] 已清空歌词缓存（删除 {removed} 个文件）");
+            RefreshCacheStats();
+        };
+        logBody.Children.Add(clearCacheBtn);
+
+        // ===== 卡片 8：更新与启动 =====
+        var upd = CardPanel(panel, "更新与启动");
         upd.Children.Add(new TextBlock
         {
             Text = "仓库已转公开：不填令牌也能检查更新（匿名）。令牌框保留备用——仓库以后切回私有时，" +
@@ -367,55 +533,11 @@ public sealed class SettingsWindow : FluentWindow
         updateBtnRow.Children.Add(checkBtn);
         updateBtnRow.Children.Add(_installBtn);
         upd.Children.Add(updateBtnRow);
+        // v0.8：开机自动启动（走 HKCU Run 注册表，见 Ui.AutoStartRegistry）
+        _autoStartSwitch = AddSwitchRow(upd, "开机自动启动（登录 Windows 后自动运行）",
+            v => SetAutoStart(v));
 
-        // ===== 卡片 6：纯音乐标记 =====
-        var marks = CardPanel(panel, "纯音乐标记（被标记的曲目不再取词）");
-        _marksCount = new TextBlock { Foreground = Theme.SubTextBrush, FontSize = 12, TextWrapping = TextWrapping.Wrap };
-        marks.Children.Add(_marksCount);
-        _marksList = new ListBox
-        {
-            MaxHeight = 110,
-            Margin = new Thickness(0, 6, 0, 0),
-            Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0)
-        };
-        marks.Children.Add(_marksList);
-        var clearMarks = new Button { Content = "清空全部标记", Height = 30, Margin = new Thickness(0, 8, 0, 0) };
-        clearMarks.Click += (_, _) =>
-        {
-            if (_settings.InstrumentalKeys.Count == 0) return;
-            _settings.InstrumentalKeys.Clear();
-            _settings.RequestSave();
-            RefreshInstrumentalMarks();
-            InstrumentalMarksChanged?.Invoke();
-        };
-        marks.Children.Add(clearMarks);
-
-        // ===== 卡片 7：诊断日志 =====
-        var logBody = CardPanel(panel, "诊断日志（广告识别/播放状态都记在这里）");
-        logBody.Children.Add(new TextBlock
-        {
-            Text = AppLog.LogPath,
-            Foreground = Theme.SubTextBrush,
-            FontSize = 11.5,
-            TextWrapping = TextWrapping.Wrap
-        });
-        var logBtn = new Button { Content = "打开日志", Height = 32, Margin = new Thickness(0, 8, 0, 0) };
-        logBtn.Click += (_, _) => OpenLogRequested?.Invoke();
-        logBody.Children.Add(logBtn);
-
-        // 恢复默认（实时生效）。没有「完成」按钮——关窗请用标题栏 ✕。
-        var reset = new Button { Content = "恢复默认外观（纯文字 + 绿色平滑逐字）", Height = 34 };
-        reset.Click += (_, _) =>
-        {
-            _loading = true;
-            _settings.ResetStyle();
-            LoadIntoControls();
-            _loading = false;
-            LiveChanged?.Invoke();
-            _settings.RequestSave();
-        };
-        panel.Children.Add(reset);
+        // 没有「完成」按钮——所有改动实时生效，关窗请用标题栏 ✕。
 
         var scroll = new ScrollViewer
         {
@@ -658,11 +780,67 @@ public sealed class SettingsWindow : FluentWindow
 
     private void RefreshInstrumentalMarks()
     {
-        _marksList.Items.Clear();
-        foreach (string k in _settings.InstrumentalKeys) _marksList.Items.Add(k);
         _marksCount.Text = _settings.InstrumentalKeys.Count == 0
             ? "暂无标记。在悬浮窗右击菜单、托盘菜单或手动选词窗里可把当前曲目标记为纯音乐（标题带「纯音乐/Instrumental」等词的也会自动标记）。"
-            : $"共 {_settings.InstrumentalKeys.Count} 条（上限 500，新标记自动挤掉最旧的）。标记按「歌名|歌手」记录：";
+            : $"共 {_settings.InstrumentalKeys.Count} 条（上限 500，新标记自动挤掉最旧的）。";
+    }
+
+    /// <summary>v0.8：打开纯音乐名单独立窗（单例；窗内变更后回刷本卡计数）。</summary>
+    private void OpenMarksWindow()
+    {
+        try
+        {
+            if (_marksWindow != null) { _marksWindow.Activate(); return; }
+            var win = new InstrumentalListWindow(_settings, () =>
+            {
+                RefreshInstrumentalMarks();
+                InstrumentalMarksChanged?.Invoke();
+            })
+            { Owner = this };
+            _marksWindow = win;
+            win.Closed += (_, _) => { if (ReferenceEquals(_marksWindow, win)) _marksWindow = null; };
+            win.Show();
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"[纯音乐] 名单窗打开失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>v0.8：翻译凭据区按选中服务动态显示（自动/Google/MyMemory 时三组全收起）。</summary>
+    private void UpdateCredVisibility()
+    {
+        string svc = _settings.TranslateService;
+        _credBaidu.Visibility = svc == TranslateServiceIds.Baidu ? Visibility.Visible : Visibility.Collapsed;
+        _credYoudao.Visibility = svc == TranslateServiceIds.Youdao ? Visibility.Visible : Visibility.Collapsed;
+        _credMs.Visibility = svc == TranslateServiceIds.Microsoft ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>v0.8：刷新歌词缓存统计文案。</summary>
+    private void RefreshCacheStats()
+    {
+        var (songs, bytes) = CacheStats.Measure(Settings.CacheDir);
+        _cacheText.Text = "本地缓存：" + CacheStats.Format(songs, bytes) +
+            "（清掉后下次播放会重新联网取词；设置与纯音乐标记不受影响）";
+    }
+
+    /// <summary>
+    /// v0.8：开机自启开关落地——写 HKCU Run 注册表；写失败记日志并把开关显示
+    /// 回滚到注册表实际状态（AddSwitchRow 的事件里 _loading 守卫防递归触发）。
+    /// </summary>
+    private void SetAutoStart(bool enable)
+    {
+        if (!AutoStartRegistry.SetEnabled(enable))
+        {
+            bool actual = AutoStartRegistry.IsEnabled();
+            AppLog.Write($"[自启] 注册表写入失败，开机自启保持{(actual ? "开启" : "关闭")}");
+            _loading = true;
+            _autoStartSwitch.IsChecked = actual;
+            _loading = false;
+            return;
+        }
+        _settings.AutoStartEnabled = enable;
+        AppLog.Write($"[自启] 开机自动启动 = {enable}");
     }
 
     private void LoadIntoControls()
@@ -687,6 +865,29 @@ public sealed class SettingsWindow : FluentWindow
             if (item is FontChoice c && c.Source == _settings.FontFamily)
             { _fontCombo.SelectedItem = c; break; }
         _mxmKey.Text = _settings.MusixmatchApiKey;
+        // v0.8：译文与翻译卡的回填
+        _transServiceCombo.SelectedItem = null;
+        foreach (ComboBoxItem item in _transServiceCombo.Items)
+            if (item.Tag as string == _settings.TranslateService) { _transServiceCombo.SelectedItem = item; break; }
+        if (_transServiceCombo.SelectedItem == null && _transServiceCombo.Items.Count > 0)
+            _transServiceCombo.SelectedIndex = 0;
+        _mmEmail.Text = _settings.MyMemoryEmail;
+        _baiduId.Text = _settings.BaiduAppId;
+        _baiduKey.Text = _settings.BaiduKey;
+        _youdaoId.Text = _settings.YoudaoAppId;
+        _youdaoKey.Text = _settings.YoudaoKey;
+        _msKey.Text = _settings.MsTranslatorKey;
+        _msRegion.Text = _settings.MsTranslatorRegion;
+        UpdateCredVisibility();
+        RefreshCacheStats();
+        // v0.8：开机自启以注册表实际值为准对齐（设置里的记录与注册表不一致时回写）
+        bool autoStart = AutoStartRegistry.IsEnabled();
+        if (autoStart != _settings.AutoStartEnabled)
+        {
+            _settings.AutoStartEnabled = autoStart;
+            _settings.RequestSave();
+        }
+        _autoStartSwitch.IsChecked = autoStart;
         _syncingToken = true;
         _tokenPwd.Password = _settings.GithubToken;
         _tokenText.Text = _settings.GithubToken;

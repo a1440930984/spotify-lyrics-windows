@@ -73,4 +73,18 @@ public static class InstrumentalMarks
     {
         if (settings.InstrumentalKeys.Remove(trackKey)) settings.RequestSave();
     }
+
+    /// <summary>
+    /// 标记 Key 的易读展示（v0.8）：Key 格式是「标题|歌手」，名单窗里显示成「标题 - 歌手」；
+    /// 没有分隔符的原样返回。
+    /// </summary>
+    public static string FormatKey(string key)
+    {
+        string k = key ?? "";
+        int i = k.IndexOf('|');
+        if (i < 0) return k;
+        string title = k.Substring(0, i).Trim();
+        string artist = k.Substring(i + 1).Trim();
+        return artist.Length > 0 ? $"{title} - {artist}" : title;
+    }
 }

@@ -50,6 +50,28 @@ public sealed class Settings
     /// </summary>
     public bool ConvertTradToSimp { get; set; } = true;
     /// <summary>
+    /// v0.8 新增：翻译服务选择（auto/mymemory/google/baidu/youdao/microsoft，见
+    /// Lyrics.TranslateServiceIds）。auto = 现行自动链（Google gtx → MyMemory）；
+    /// 选单个服务时优先用它，失败自动回落自动链，不会因选路而断路。
+    /// </summary>
+    public string TranslateService { get; set; } = "auto";
+    /// <summary>v0.8 新增：MyMemory 的 de 邮箱（可选，只存本机；带上后日额度 5000→50000 字符）。</summary>
+    public string MyMemoryEmail { get; set; } = "";
+    /// <summary>v0.8 新增：百度翻译开放平台凭据（APP ID + 密钥，只存本机，用户自备免费额度）。</summary>
+    public string BaiduAppId { get; set; } = "";
+    public string BaiduKey { get; set; } = "";
+    /// <summary>v0.8 新增：有道智云凭据（应用 ID + 应用密钥，只存本机，用户自备）。</summary>
+    public string YoudaoAppId { get; set; } = "";
+    public string YoudaoKey { get; set; } = "";
+    /// <summary>v0.8 新增：微软 Azure 翻译凭据（密钥 + 区域，如 eastasia；只存本机，用户自备）。</summary>
+    public string MsTranslatorKey { get; set; } = "";
+    public string MsTranslatorRegion { get; set; } = "";
+    /// <summary>
+    /// v0.8 新增：开机自动启动的「期望状态」记录（真实来源是 HKCU Run 注册表值，
+    /// 设置窗打开时以注册表实际值对齐回写本字段）。
+    /// </summary>
+    public bool AutoStartEnabled { get; set; } = false;
+    /// <summary>
     /// v0.6 新增：纯音乐标记（曲目 Key 集合，借鉴 LyricFlow instrumentalKeys，上限 500，超限淘汰最旧）。
     /// 命中标记的曲目不再联网取词，悬浮窗显示「纯音乐」提示。
     /// </summary>
@@ -69,6 +91,10 @@ public sealed class Settings
         if (!IsValidHex(HighlightColorHex)) HighlightColorHex = "#FF1ED760";
         if (string.IsNullOrWhiteSpace(FontFamily)) FontFamily = "Microsoft YaHei UI";
         if (string.IsNullOrWhiteSpace(UiTheme)) UiTheme = "light";
+        if (!SpotifyLyricsWin.Lyrics.TranslateServiceIds.IsValid(TranslateService)) TranslateService = "auto";
+        MyMemoryEmail ??= ""; BaiduAppId ??= ""; BaiduKey ??= "";
+        YoudaoAppId ??= ""; YoudaoKey ??= "";
+        MsTranslatorKey ??= ""; MsTranslatorRegion ??= "";
         InstrumentalKeys ??= new List<string>();
         NotAdKeys ??= new List<string>();
         TrimToCap(InstrumentalKeys, 500);

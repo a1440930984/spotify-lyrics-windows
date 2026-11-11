@@ -106,6 +106,52 @@ return null;
 catch { return null;}
 }
 
+/// <summary>
+/// v0.8：POST 表单（有道智云用）。失败语义与 GetStringAsync 一致（吞异常返回 null、
+/// 超时/网络异常计入网络失败计数，供取词失败分类共用同一口径）。
+/// </summary>
+public static async Task<string?> PostFormAsync(string url,
+IReadOnlyDictionary<string, string> form, CancellationToken ct, int timeoutSec = 10)
+{
+using var content = new FormUrlEncodedContent(form);
+return await PostAsync(url, content, null, ct, timeoutSec).ConfigureAwait(false);
+}
+
+/// <summary>v0.8：POST JSON 并附自定义头（微软 Azure 翻译用）。失败语义同上。</summary>
+public static async Task<string?> PostJsonAsync(string url, string jsonBody,
+IReadOnlyDictionary<string, string> headers, CancellationToken ct, int timeoutSec = 10)
+{
+using var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+return await PostAsync(url, content, headers, ct, timeoutSec).ConfigureAwait(false);
+}
+
+private static async Task<string?> PostAsync(string url, HttpContent content,
+IReadOnlyDictionary<string, string>? headers, CancellationToken ct, int timeoutSec)
+{
+try
+{
+using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+cts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+if (headers != null)
+foreach (var kv in headers) req.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
+using var resp = await Client.SendAsync(req, cts.Token).ConfigureAwait(false);
+if (!resp.IsSuccessStatusCode) return null;
+return await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+}
+catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+{
+Interlocked.Increment(ref _networkFailures);
+return null;
+}
+catch (Exception) when (!ct.IsCancellationRequested)
+{
+Interlocked.Increment(ref _networkFailures);
+return null;
+}
+catch { return null; }
+}
+
 public static string Enc(string s) => Uri.EscapeDataString(s);
 
 // ---------- 匹配 ----------

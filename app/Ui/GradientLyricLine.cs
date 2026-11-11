@@ -16,6 +16,7 @@ public sealed class GradientLyricLine : FrameworkElement
     private string _text = "";
     private double _desiredFontSize = 18;
     private string _fontFamily = "Microsoft YaHei UI";
+    private FontWeight _fontWeight = FontWeights.Bold;
     private Color _hiColor = Color.FromArgb(0xFF, 0x1E, 0xD7, 0x60);
     private Color _normalColor = Colors.White;
     private float _fraction;
@@ -42,15 +43,31 @@ public sealed class GradientLyricLine : FrameworkElement
         return ft.WidthIncludingTrailingWhitespace;
     }
 
-    public void Configure(Color highlight, Color normal, double fontSize, string fontFamily)
+    public void Configure(Color highlight, Color normal, double fontSize, string fontFamily) =>
+        Configure(highlight, normal, fontSize, fontFamily, FontWeights.Bold, 1.0);
+
+    /// <summary>
+    /// v0.8 扩展：字重与整体颜色 alpha（译文行用——常规字重形成主次，
+    /// 两色同乘 alpha 0.78 让译文整体退后一层，扫光着色在这层 alpha 之上做、不与原文撞色）。
+    /// </summary>
+    public void Configure(Color highlight, Color normal, double fontSize, string fontFamily,
+        FontWeight weight, double colorAlpha)
     {
-        _hiColor = highlight;
-        _normalColor = normal;
+        _hiColor = WithAlpha(highlight, colorAlpha);
+        _normalColor = WithAlpha(normal, colorAlpha);
         _desiredFontSize = fontSize;
         _fontFamily = fontFamily;
+        _fontWeight = weight;
         _cachedText = null;
+        _charWidths = null;
         InvalidateMeasure();
         InvalidateVisual();
+    }
+
+    private static Color WithAlpha(Color c, double factor)
+    {
+        if (factor >= 0.999) return c;
+        return Color.FromArgb((byte)Math.Round(c.A * Math.Clamp(factor, 0, 1)), c.R, c.G, c.B);
     }
 
     public void SetText(string text)
@@ -82,7 +99,7 @@ public sealed class GradientLyricLine : FrameworkElement
     }
 
     private Typeface Typeface => new(new FontFamily(_fontFamily),
-        FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
+        FontStyles.Normal, _fontWeight, FontStretches.Normal);
 
     private FormattedText BuildWrapped(double width, double fontSize)
     {

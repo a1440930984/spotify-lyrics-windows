@@ -30,15 +30,18 @@ public sealed class ManualLyricsWindow : FluentWindow
     {
         public required LyricCandidate Candidate { get; init; }
         public bool Applied { get; set; }
+        /// <summary>v0.8：这条就是当前正在用的歌词（同源同标题，见 Core.CandidateMatch）。</summary>
+        public bool IsCurrent { get; set; }
         public string Title => Candidate.Title;
         public string Artist => Candidate.Artist;
         public string ProviderName => Candidate.ProviderName;
         public string DurationText => Candidate.DurationText;
         public string WordLabel => Candidate.WordLevel ? "逐字" : "逐行";
-        public string AppliedText => Applied ? "✓ 已应用" : "";
+        /// <summary>卡片右上角状态字：刚应用 > 当前使用（两者同时成立时显示已应用）。</summary>
+        public string StatusText => Applied ? "✓ 已应用" : IsCurrent ? "● 当前使用" : "";
         public string Display =>
             $"[{Candidate.ProviderName}] {Candidate.Title} - {Candidate.Artist} · {Candidate.DurationText} · " +
-            (Candidate.WordLevel ? "逐字" : "逐行") + (Applied ? " ✓ 已应用" : "");
+            (Candidate.WordLevel ? "逐字" : "逐行") + (Applied ? " ✓ 已应用" : IsCurrent ? " ● 当前使用" : "");
         public override string ToString() => Display;
     }
 
@@ -51,6 +54,10 @@ public sealed class ManualLyricsWindow : FluentWindow
     private readonly TextBlock _status = new();
     private CancellationTokenSource? _searchCts;
     private bool _applying;
+
+    /// <summary>v0.8：当前已应用歌词的来源名与标题（主程序注入；候选里同源同标题的那条标「当前使用」并置顶）。</summary>
+    public string CurrentSourceName { get; set; } = "";
+    public string CurrentTitle { get; set; } = "";
 
     /// <summary>搜索委托：(歌名, 歌手) → 各源分组结果。</summary>
     public Func<string, string, CancellationToken, Task<IReadOnlyList<CandidateGroup>>>? SearchAsync { get; set; }
@@ -76,6 +83,10 @@ public sealed class ManualLyricsWindow : FluentWindow
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var titleBar = new TitleBar { Title = "手动选词", ShowMaximize = false };
+        // v0.8：每个窗都带 app 图标（窗口 Icon + Fluent 标题栏图标）
+        WindowIcon.Apply(this);
+        if (WindowIcon.LoadImageSource() is { } iconSrc)
+            titleBar.Icon = new ImageIcon { Source = iconSrc };
         Grid.SetRow(titleBar, 0);
         root.Children.Add(titleBar);
 
@@ -137,6 +148,9 @@ public sealed class ManualLyricsWindow : FluentWindow
             BorderThickness = new Thickness(0),
             ItemContainerStyle = CardItemStyle()
         };
+        // v0.8：横向滚动条默认不出现（卡片宽度自适应窗宽，不需要横滚）；纵向保持 Auto
+        ScrollViewer.SetHorizontalScrollBarVisibility(_list, ScrollBarVisibility.Disabled);
+        ScrollViewer.SetVerticalScrollBarVisibility(_list, ScrollBarVisibility.Auto);
         var cardTpl = LoadCardTemplate();
         if (cardTpl != null) _list.ItemTemplate = cardTpl; // 加载/自检失败保持纯文本行（CandidateRow.ToString）
         _list.SelectionChanged += (_, _) =>
@@ -197,12 +211,12 @@ public sealed class ManualLyricsWindow : FluentWindow
                       <ColumnDefinition Width="*"/>
                       <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="{Binding Title}" FontSize="13.5" FontWeight="Bold"
+                    <TextBlock Text="{Binding Title}" FontSize="12" FontWeight="Bold"
                                Foreground="{{text}}" TextTrimming="CharacterEllipsis"/>
-                    <TextBlock Grid.Column="1" Text="{Binding AppliedText}" Foreground="{{accent}}"
-                               FontSize="12" Margin="8,0,0,0"/>
+                    <TextBlock Grid.Column="1" Text="{Binding StatusText}" Foreground="{{accent}}"
+                               FontSize="11" Margin="8,0,0,0"/>
                   </Grid>
-                  <TextBlock Margin="0,3,0,0" FontSize="12" Foreground="{{sub}}"
+                  <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{{sub}}"
                              TextTrimming="CharacterEllipsis"><Run Text="{Binding Artist}"/><Run Text=" · "/><Run Text="{Binding DurationText}"/></TextBlock>
                   <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                     <Border CornerRadius="6" Background="{{badge}}" Padding="7,2" Margin="0,0,6,0">
@@ -301,6 +315,7 @@ public sealed class ManualLyricsWindow : FluentWindow
             if (ct.IsCancellationRequested) return;
             int total = 0;
             var summary = new List<string>();
+            var rows = new List<CandidateRow>();
             foreach (var g in groups)
             {
                 if (g.Result.Error is string err)
@@ -311,10 +326,19 @@ public sealed class ManualLyricsWindow : FluentWindow
                 summary.Add($"{g.ProviderName}：{g.Result.Candidates.Count} 条");
                 foreach (var c in g.Result.Candidates)
                 {
-                    _list.Items.Add(new CandidateRow { Candidate = c });
+                    rows.Add(new CandidateRow
+                    {
+                        Candidate = c,
+                        // v0.8：与当前已应用歌词同源同标题 → 标「当前使用」
+                        IsCurrent = CandidateMatch.IsCurrent(
+                            c.ProviderName, c.Title, CurrentSourceName, CurrentTitle)
+                    });
                     total++;
                 }
             }
+            // v0.8：「当前使用」置顶（稳定排序，其余维持原分数/来源顺序）
+            foreach (var row in rows.OrderByDescending(r => r.IsCurrent))
+                _list.Items.Add(row);
             _status.Text = total > 0
                 ? $"共 {total} 条候选。来源情况——{string.Join("｜", summary)}"
                 : $"没有搜到候选。来源情况——{string.Join("｜", summary)}";
@@ -344,7 +368,11 @@ public sealed class ManualLyricsWindow : FluentWindow
             if (ok)
             {
                 foreach (var item in _list.Items)
-                    if (item is CandidateRow r) r.Applied = ReferenceEquals(r, row);
+                    if (item is CandidateRow r)
+                    {
+                        r.Applied = ReferenceEquals(r, row);
+                        r.IsCurrent = ReferenceEquals(r, row);
+                    }
                 _list.Items.Refresh();
                 _status.Text = $"已应用「{row.Candidate.ProviderName}」的歌词，并记为当前曲目的歌词（覆盖缓存）。";
                 AppLog.Write($"[手动选词] 已应用候选：{row.Candidate.ProviderName}「{row.Candidate.Title} - {row.Candidate.Artist}」");

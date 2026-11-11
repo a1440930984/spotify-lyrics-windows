@@ -24,6 +24,10 @@ public sealed class Tray : IDisposable
     public event Action? NotAd;
     /// <summary>v0.6：标记/取消标记当前曲目为纯音乐。</summary>
     public event Action? ToggleInstrumental;
+    /// <summary>v0.8：托盘菜单「检查更新」（走主程序的手动检查路径，有无新版都给反馈）。</summary>
+    public event Action? CheckUpdate;
+    /// <summary>v0.8：托盘菜单「重置歌词窗位置」（悬浮窗飞出屏幕时一键找回）。</summary>
+    public event Action? ResetFloatingPosition;
 
     public Tray()
     {
@@ -46,6 +50,8 @@ public sealed class Tray : IDisposable
         _instrumentalItem.Click += (_, _) => ToggleInstrumental?.Invoke();
         menu.Items.Add(_instrumentalItem);
         menu.Items.Add("打开日志", null, (_, _) => OpenLog?.Invoke());
+        menu.Items.Add("检查更新", null, (_, _) => CheckUpdate?.Invoke());
+        menu.Items.Add("重置歌词窗位置", null, (_, _) => ResetFloatingPosition?.Invoke());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => ExitApp?.Invoke());
         _icon.ContextMenuStrip = menu;

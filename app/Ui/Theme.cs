@@ -43,12 +43,14 @@ public static class Theme
         {
             ["spotify-dark"] = new ThemePalette
             {
+                // v0.8：与纯黑拉开距离——底色改明显深灰（#1E1E1E）、卡片 #2A2A2A
+                // （v0.7 的 #121212 与纯黑 #000000 并排仍难分，Sun 复验时明确质疑）。
                 Id = "spotify-dark", DisplayName = "Spotify 深色",
-                Bg = Color.FromRgb(0x12, 0x12, 0x12), Panel = Color.FromRgb(0x1E, 0x1E, 0x1E),
-                Border = Color.FromRgb(0x2A, 0x2A, 0x2A), Text = Colors.White,
+                Bg = Color.FromRgb(0x1E, 0x1E, 0x1E), Panel = Color.FromRgb(0x2A, 0x2A, 0x2A),
+                Border = Color.FromRgb(0x3D, 0x3D, 0x3D), Text = Colors.White,
                 SubText = Color.FromRgb(0xB3, 0xB3, 0xB3), Accent = Color.FromRgb(0x1E, 0xD7, 0x60),
-                Hover = Color.FromRgb(0x2A, 0x2A, 0x2A), Pressed = Color.FromRgb(0x33, 0x33, 0x33),
-                SelectedRow = Color.FromRgb(0x24, 0x3A, 0x2B), TitleBar = Color.FromRgb(0x18, 0x18, 0x18),
+                Hover = Color.FromRgb(0x36, 0x36, 0x36), Pressed = Color.FromRgb(0x42, 0x42, 0x42),
+                SelectedRow = Color.FromRgb(0x24, 0x3A, 0x2B), TitleBar = Color.FromRgb(0x25, 0x25, 0x25),
                 IsLight = false
             },
             ["pure-black"] = new ThemePalette
@@ -90,15 +92,16 @@ public static class Theme
     public const string DefaultPaletteId = "light";
 
     /// <summary>
-    /// FluentWindow 的背景材质（v0.7）：纯黑/深蓝两套**关掉 Mica**——Mica 是系统材质、
-    /// 不吃应用资源覆写，v0.6 时两套主题的背景覆写全被它罩住、看着一模一样（用户实测）。
-    /// 关掉后窗口背景走 ApplicationBackgroundBrush 覆写（调色板色），两套立分。
-    /// 其余两套（Spotify 深色/浅色）保留 Mica 质感。
+    /// FluentWindow 的背景材质：深色三套**全关 Mica**——Mica 是系统材质、不吃应用
+    /// 资源覆写，v0.6 时主题背景覆写全被它罩住、几套看着一模一样（用户两度实测质疑）。
+    /// v0.7 先关了纯黑/深蓝，v0.8 把 Spotify 深色也关掉：三套深色的窗口背景都老实走
+    /// ApplicationBackgroundBrush 覆写（各自调色板色），色差不再被材质吃掉。
+    /// 只有浅色套保留 Mica 质感（它的底色与系统材质接近，不影响辨识）。
     /// </summary>
     public static Wpf.Ui.Controls.WindowBackdropType Backdrop =>
-        Current.Id is "pure-black" or "deep-blue"
-            ? Wpf.Ui.Controls.WindowBackdropType.None
-            : Wpf.Ui.Controls.WindowBackdropType.Mica;
+        Current.IsLight
+            ? Wpf.Ui.Controls.WindowBackdropType.Mica
+            : Wpf.Ui.Controls.WindowBackdropType.None;
 
     private static ThemePalette _current = Palettes[DefaultPaletteId];
     private static readonly Dictionary<string, SolidColorBrush> _brushCache = new();
@@ -594,22 +597,104 @@ public static class Theme
         return s;
     }
 
-    /// <summary>悬浮窗右击菜单的深色样式（菜单不是三窗之一，顺手统一）。</summary>
+    /// <summary>
+    /// 悬浮窗右击菜单样式（v0.8 重做）：v0.7 以前这里只给 ContextMenu/MenuItem 设了
+    /// 背景/前景色、**没给模板**——WPF 菜单项的实际外观（白底高亮、复选标记列、内边距）
+    /// 全由系统默认模板决定，深色主题下菜单仍是浅底、与界面脱节（Sun 真机截图实锤）。
+    /// 现在补齐纯代码模板：菜单面 = 调色板卡片色 + 描边 + 圆角；菜单项 = 统一项高、
+    /// 复选列对齐、悬停走调色板 Hover 色。深色套下深底、浅色套下浅底，跟随当前调色板。
+    /// </summary>
     public static Style ContextMenuStyle()
     {
+        var border = new FrameworkElementFactory(typeof(Border), "Bd");
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
+        border.SetValue(Border.PaddingProperty, new Thickness(4));
+        var sv = new FrameworkElementFactory(typeof(ScrollViewer));
+        sv.SetValue(ScrollViewer.CanContentScrollProperty, true);
+        sv.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
+        sv.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Disabled);
+        var items = new FrameworkElementFactory(typeof(ItemsPresenter));
+        sv.AppendChild(items);
+        border.AppendChild(sv);
+        var tpl = new ControlTemplate(typeof(ContextMenu)) { VisualTree = border };
+
         var s = new Style(typeof(ContextMenu));
         s.Setters.Add(new Setter(Control.BackgroundProperty, PanelBrush));
         s.Setters.Add(new Setter(Control.ForegroundProperty, TextBrush));
         s.Setters.Add(new Setter(Control.BorderBrushProperty, BorderBrush));
         s.Setters.Add(new Setter(Control.FontFamilyProperty, UiFont));
+        s.Setters.Add(new Setter(Control.FontSizeProperty, 13.0));
+        s.Setters.Add(new Setter(Control.TemplateProperty, tpl));
         return s;
     }
 
     public static Style MenuItemStyle()
     {
+        var border = new FrameworkElementFactory(typeof(Border), "Bd");
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        var grid = new FrameworkElementFactory(typeof(Grid));
+        var colMark = new FrameworkElementFactory(typeof(ColumnDefinition));
+        colMark.SetValue(ColumnDefinition.WidthProperty, new GridLength(24));
+        var colText = new FrameworkElementFactory(typeof(ColumnDefinition));
+        colText.SetValue(ColumnDefinition.WidthProperty, new GridLength(1, GridUnitType.Star));
+        grid.AppendChild(colMark);
+        grid.AppendChild(colText);
+        var mark = new FrameworkElementFactory(typeof(TextBlock), "Mark");
+        mark.SetValue(TextBlock.TextProperty, "✓");
+        mark.SetValue(TextBlock.FontSizeProperty, 12.0);
+        mark.SetValue(TextBlock.FontWeightProperty, FontWeights.Bold);
+        mark.SetValue(TextBlock.ForegroundProperty, AccentBrush);
+        mark.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        mark.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        mark.SetValue(UIElement.OpacityProperty, 0.0);
+        grid.AppendChild(mark);
+        var cp = new FrameworkElementFactory(typeof(ContentPresenter));
+        cp.SetBinding(ContentPresenter.ContentProperty,
+            new Binding(nameof(MenuItem.Header))
+            { RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent) });
+        cp.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        cp.SetValue(ContentPresenter.RecognizesAccessKeyProperty, true);
+        cp.SetValue(Grid.ColumnProperty, 1);
+        grid.AppendChild(cp);
+        border.AppendChild(grid);
+        var tpl = new ControlTemplate(typeof(MenuItem)) { VisualTree = border };
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty, HoverBrush, "Bd"));
+        tpl.Triggers.Add(hover);
+        var highlighted = new Trigger { Property = MenuItem.IsHighlightedProperty, Value = true };
+        highlighted.Setters.Add(new Setter(Border.BackgroundProperty, HoverBrush, "Bd"));
+        tpl.Triggers.Add(highlighted);
+        var checkedT = new Trigger { Property = MenuItem.IsCheckedProperty, Value = true };
+        checkedT.Setters.Add(new Setter(UIElement.OpacityProperty, 1.0, "Mark"));
+        tpl.Triggers.Add(checkedT);
+        var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.45));
+        tpl.Triggers.Add(disabled);
+
         var s = new Style(typeof(MenuItem));
+        s.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
         s.Setters.Add(new Setter(Control.ForegroundProperty, TextBrush));
         s.Setters.Add(new Setter(Control.FontFamilyProperty, UiFont));
+        s.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(2, 0, 14, 0)));
+        s.Setters.Add(new Setter(FrameworkElement.MinHeightProperty, 30.0));
+        s.Setters.Add(new Setter(Control.TemplateProperty, tpl));
+        return s;
+    }
+
+    /// <summary>菜单分隔线（v0.8）：1px 调色板描边色、上下留 4、左右缩进与文字对齐。</summary>
+    public static Style MenuSeparatorStyle()
+    {
+        var rect = new FrameworkElementFactory(typeof(Border));
+        rect.SetValue(Border.BackgroundProperty, BorderBrush);
+        rect.SetValue(FrameworkElement.HeightProperty, 1.0);
+        rect.SetValue(FrameworkElement.MarginProperty, new Thickness(10, 4, 10, 4));
+        var tpl = new ControlTemplate(typeof(Separator)) { VisualTree = rect };
+        var s = new Style(typeof(Separator));
+        s.Setters.Add(new Setter(Control.TemplateProperty, tpl));
         return s;
     }
 }

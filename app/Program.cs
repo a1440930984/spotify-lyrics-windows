@@ -27,6 +27,9 @@ public static class Program
 
     private static string _fetchingKey = "";
     private static string _loadedKey = "";
+    // v0.8：当前已应用歌词的来源与候选标题（供手动选词窗标「当前使用」并置顶）
+    private static string _currentSourceName = "";
+    private static string _currentCandidateTitle = "";
     private static CancellationTokenSource? _fetchCts;
     private static string _statusHint = "♪ 等待 Spotify 播放";
     private static bool _notFound;
@@ -78,7 +81,7 @@ public static class Program
         // v0.3：启动先落一行日志，保证 log.txt 必然存在（v0.2 只在广告命中时写，
         // 从未命中就没文件，用户找不到）。路径：%AppData%/SpotifyLyricsWin/log.txt
         AppLog.EnsureFile();
-        AppLog.Write("[启动] SpotifyLyricsWin v0.7 启动");
+        AppLog.Write($"[启动] SpotifyLyricsWin v{UpdateService.CurrentVersion} 启动");
 
         // v0.4：先看上次自动更新的结果（Updater 写的 update-result.json），汇报一次后删掉
         var lastResult = UpdateService.ReadResult();
@@ -137,6 +140,33 @@ public static class Program
         _tray.NotAd += OnNotAd;
         _tray.ToggleInstrumental += OnToggleInstrumental;
         _tray.OpenLog += OpenLogFile;
+        // v0.8：托盘「检查更新」——走手动检查路径，有无新版都给反馈（见 HandleCheckResult）
+        _tray.CheckUpdate += async () =>
+        {
+            AppLog.Write("[自动更新] 用户从托盘菜单手动检查更新");
+            var r = await UpdateService.CheckLatestAsync(_settings.GithubToken);
+            HandleCheckResult(r, manual: true);
+        };
+        // v0.8：托盘「重置歌词窗位置」——清位置记忆并挪回默认位（首开同款：居中、距顶 120），
+        // 治悬浮窗被拖出屏幕/换显示器后找不回来。
+        _tray.ResetFloatingPosition += () =>
+        {
+            _settings.FloatingX = null;
+            _settings.FloatingY = null;
+            _settings.RequestSave();
+            var wa = SystemParameters.WorkArea;
+            var (left, top) = WindowPlacement.DefaultFloatingPosition(
+                wa.Left, wa.Top, wa.Width, _floating.Width);
+            _floating.Left = left;
+            _floating.Top = top;
+            if (!_settings.FloatingEnabled)
+            {
+                _settings.FloatingEnabled = true;
+                _settings.Save();
+                _floating.Show();
+            }
+            AppLog.Write($"[悬浮窗] 位置已重置到默认（{left:0},{top:0}）");
+        };
         _tray.BalloonClicked += OpenSettings;
         _tray.ExitApp += () =>
         {
@@ -396,13 +426,13 @@ public static class Program
         var res = Application.Current.Resources;
         foreach (string k in _fluentOverrideKeys) res.Remove(k);
         _fluentOverrideKeys.Clear();
-        if (palette.Id is "pure-black" or "deep-blue")
+        if (palette.Id is "pure-black" or "deep-blue" or "spotify-dark")
         {
             // v0.7 覆写补全：v0.6 只写了两个 Brush 键，且 FluentWindow 开着 Mica 时
-            // 窗口背景根本不走这些键（系统材质罩住），两套主题看着一模一样。
-            // 本版双管齐下：这两套的窗口改走 WindowBackdropType.None（见 Theme.Backdrop），
-            // 覆写键也从「背景 + 卡片背景」补到描边与对应的 Color 键
-            // （库里部分模板引用的是 Color 资源，只写 Brush 会漏）。
+            // 窗口背景根本不走这些键（系统材质罩住），几套主题看着一模一样。
+            // 双管齐下：深色套的窗口改走 WindowBackdropType.None（见 Theme.Backdrop，
+            // v0.8 起深色三套全关 Mica），覆写键也从「背景 + 卡片背景」补到描边与
+            // 对应的 Color 键（库里部分模板引用的是 Color 资源，只写 Brush 会漏）。
             SetOverride("ApplicationBackgroundBrush", palette.Bg);
             SetColorOverride("ApplicationBackgroundColor", palette.Bg);
             SetOverride("CardBackgroundFillColorDefaultBrush", palette.Panel);
@@ -514,9 +544,14 @@ public static class Program
                 _pendingRelease = null;
                 _settingsWindow?.HideUpdateAvailable();
                 _settingsWindow?.SetUpdateStatus(result.Message);
+                // v0.8：托盘手动检查且设置窗没开着时，气泡给个回音，别点了没反应
+                if (manual && _settingsWindow == null)
+                    _tray.ShowBalloon("检查更新", result.Message);
                 break;
             default: // NoToken / Failed
                 _settingsWindow?.SetUpdateStatus(result.Message);
+                if (manual && _settingsWindow == null)
+                    _tray.ShowBalloon("检查更新", result.Message);
                 break;
         }
     }
@@ -635,6 +670,11 @@ public static class Program
         }
         _manualWindow.SearchAsync = (title, artist, ct) =>
             _service.SearchCandidatesAsync(title, artist, ct);
+        // v0.8：把「当前在用的歌词」注入选词窗（标当前使用并置顶）；
+        // 打分路径有候选标题，顺序回退路径没有——退用曲目标题匹配。
+        _manualWindow.CurrentSourceName = _currentSourceName;
+        _manualWindow.CurrentTitle = _currentCandidateTitle.Length > 0
+            ? _currentCandidateTitle : (t?.Title ?? "");
         _manualWindow.ApplyAsync = async candidate =>
         {
             var track = _tracker.Current;
@@ -645,6 +685,13 @@ public static class Program
             _rawLyrics = outcome.Lyrics;
             _engine.Lyrics = ToDisplayLyrics(outcome.Lyrics);
             _loadedKey = track.Key;
+            _currentSourceName = candidate.ProviderName;
+            _currentCandidateTitle = candidate.Title;
+            if (_manualWindow != null)
+            {
+                _manualWindow.CurrentSourceName = candidate.ProviderName;
+                _manualWindow.CurrentTitle = candidate.Title;
+            }
             _notFound = false;
             _tray.SetStatus($"SpotifyLyrics - 歌词：{outcome.SourceName}（手动）｜{track.Title}");
             return true;
@@ -709,6 +756,8 @@ public static class Program
                     _rawLyrics = outcome.Lyrics;
                     _engine.Lyrics = ToDisplayLyrics(outcome.Lyrics);
                     _loadedKey = key;
+                    _currentSourceName = outcome.SourceName;
+                    _currentCandidateTitle = outcome.CandidateTitle;
                     _pendingRetryKey = "";
                     _tray.SetStatus($"SpotifyLyrics - 歌词：{outcome.SourceName}｜{track.Title}");
                     AppLog.Write($"[取词] 「{track.Title}」 命中 {outcome.SourceName}" +
@@ -785,10 +834,11 @@ public static class Program
         }
 
         // 广告中：停止歌词同步推进，整块变淡并显示提示（照规格的广告变淡行为）
+        // v0.8：文案精简为「♪ 广告播放中」，且走 SetAdHint——固定默认白色，不随用户颜色设置变。
         if (_isAd && track.Key == _adKey)
         {
             _floating.SetDimmed(true);
-            if (_settings.FloatingEnabled) _floating.SetHint("广告播放中 · 歌词马上回来");
+            if (_settings.FloatingEnabled) _floating.SetAdHint("♪ 广告播放中");
             return;
         }
 

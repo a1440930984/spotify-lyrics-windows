@@ -48,6 +48,8 @@ public sealed class FloatingWindow : Window
 
     private string _lastCurrent = "\0";
     private bool _dimmed;
+    /// <summary>v0.8：广告提示模式——提示行强制固定白色，不吃用户的高亮/文字颜色设置。</summary>
+    private bool _adHintActive;
     private Point _dragStartScreen;
     private double _dragStartLeft, _dragStartTop;
     private bool _mouseDown, _dragging;
@@ -82,33 +84,40 @@ public sealed class FloatingWindow : Window
         SizeToContent = SizeToContent.Height;
         Width = 880;
 
-        var shadow = new DropShadowEffect
-        {
-            Color = Colors.Black,
-            Opacity = 0.9,           // #E6000000
-            Direction = 270,         // 向下 dy=1
-            ShadowDepth = 1,
-            BlurRadius = 4
-        };
+        // v0.8 背景「雾面」定因（实锤）：歌词文字此前挂了**双重阴影**——GradientLyricLine
+        // 的 OnRender 内部已按字形手绘一遍偏移阴影，外面又给每行套了一个 DropShadowEffect。
+        // WPF 的 DropShadowEffect 是对元素整块位图（含行盒的全部透明区）做高斯模糊，
+        // 模糊核把阴影涂满行盒的矩形范围；在浅色桌面上就成了用户截图里那层
+        // 「浅色雾面矩形」——与背景画刷无关（窗口/根 Border 经审计：Window.Background
+        // 恒透明、根 Border 在透明度 0 时 Background=Transparent、无边框、无其他色层）。
+        // 处置：渐变行去掉 Effect，只留控件内部那遍字形阴影（跟着字走、不成矩形）；
+        // 下一行 TextBlock 没有内部阴影，保留 Effect 但降到很轻（模糊 2、透明 0.5）。
+        _currentLine = new GradientLyricLine();
 
-        _currentLine = new GradientLyricLine { Effect = shadow };
-
-        // v0.7：译文用渐变行控件（与当前行同机制：按进度做字粒度渐变扫光）；
-        // 整体再压一层 0.9 不透明度，让它视觉上从属于原文行。
+        // 译文用渐变行控件（与当前行同机制：按进度做字粒度渐变扫光）；
+        // v0.8 排版：常规字重 + 颜色 alpha 0.78 在 ApplyStyle 的 Configure 里给，
+        // 这里只管间距——原文↔译文贴紧到 2（见 _translationLine.Margin），成组感靠
+        // 下一行的大留白（_nextBlock.Margin 7）拉开。
         _translationLine = new GradientLyricLine
         {
-            Effect = shadow,
-            Opacity = 0.9,
-            Margin = new Thickness(0, 3, 0, 0),
+            Margin = new Thickness(0, 2, 0, 0),
             Visibility = Visibility.Collapsed
+        };
+        var nextShadow = new DropShadowEffect
+        {
+            Color = Colors.Black,
+            Opacity = 0.5,
+            Direction = 270,
+            ShadowDepth = 1,
+            BlurRadius = 2
         };
         _nextBlock = new TextBlock
         {
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 4, 0, 0),
+            Margin = new Thickness(0, 7, 0, 0),
             Opacity = 0.6,
-            Effect = shadow
+            Effect = nextShadow
         };
 
         var stack = new StackPanel();
@@ -178,16 +187,23 @@ public sealed class FloatingWindow : Window
             Padding = new Thickness(5, 2, 5, 2),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(0, 2, 0, 0),
+            Margin = new Thickness(0),
             Opacity = 0,
             Visibility = Visibility.Collapsed,
             Child = buttons
         };
 
-        // v0.7 布局：单层 Grid —— 歌词栈是唯一内容（决定窗口高度），
-        // 按钮带 capsule 叠在同一 Grid 上（顶部居中），不占任何布局高度。
+        // v0.8 布局：两行 Grid —— 行 0 是给按钮带预留的透明留白（高 = LayoutMath.BandReserveTop，
+        // 全透明、无任何背景），歌词栈放行 1；按钮带 capsule 叠在行 0 内贴顶居中。
+        // 这样「带底边（32）≤ 第一行顶边（36）」由构造保证，双行/大字号也不会再压字
+        // （v0.7 带直接锚在歌词块顶部，胶囊正好压住第一行字形上沿，Sun 截图实锤）。
+        // 留白是纯透明区，不算背景——窗口透明度=0 时它什么都不画。
         var grid = new Grid();
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(LayoutMath.BandReserveTop) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetRow(stack, 1);
         grid.Children.Add(stack);
+        Grid.SetRow(capsule, 0);
         grid.Children.Add(capsule);
         _bandCapsule = capsule;
 
@@ -226,7 +242,7 @@ public sealed class FloatingWindow : Window
         menu.Items.Add(_notAdMenuItem);
         menu.Items.Add(_instrumentalMenuItem);
         menu.Items.Add(_lockMenuItem);
-        menu.Items.Add(new Separator());
+        menu.Items.Add(new Separator { Style = Theme.MenuSeparatorStyle() });
         menu.Items.Add(miHide);
         menu.Opened += (_, _) =>
         {
@@ -373,12 +389,18 @@ public sealed class FloatingWindow : Window
         var normal = ParseHex(_settings.TextColorHex, Colors.White);
         double size = _settings.FontSize;
 
-        _currentLine.Configure(hi, normal, size, _settings.FontFamily);
+        // v0.8：广告提示期间当前行强制固定默认色（纯白），与用户颜色设置无关
+        _currentLine.Configure(
+            _adHintActive ? Colors.White : hi,
+            _adHintActive ? Colors.White : normal,
+            size, _settings.FontFamily);
 
-        // v0.7：译文字号比例跟随（round（原文 × 0.62)，钳制规则见 LayoutMath.TranslationFontSize）；
-        // 译文渐变行与当前行同一套配色（已唱=高亮色、未唱=普通色），进度由 SetProgress 同步推进。
+        // 译文字号比例跟随（round（原文 × 0.62)，钳制规则见 LayoutMath.TranslationFontSize）；
+        // v0.8 排版规格：字重 Normal（原文 Bold，主次分明）、两色同乘 alpha 0.78
+        // （译文整体退后一层；扫光已唱段也在 0.78 的高亮色上走，不与原文的满色高亮撞）。
         _translationLine.Configure(hi, normal,
-            LayoutMath.TranslationFontSize(size), _settings.FontFamily);
+            LayoutMath.TranslationFontSize(size), _settings.FontFamily,
+            FontWeights.Normal, 0.78);
 
         var ff = new FontFamily(_settings.FontFamily);
         _nextBlock.FontFamily = ff;
@@ -439,6 +461,7 @@ public sealed class FloatingWindow : Window
     /// <summary>切行时调用：设置文本 + 切行动画。同一行重复调用只更新进度不重播动画。</summary>
     public void SetLine(string current, string next, string translation)
     {
+        if (_adHintActive) { _adHintActive = false; ApplyStyle(); }
         bool changed = current != _lastCurrent;
         _lastCurrent = current;
         _currentLine.SetText(current);
@@ -472,8 +495,25 @@ public sealed class FloatingWindow : Window
         }
     }
 
-    /// <summary>纯提示行（等待播放/正在找歌词/未找到/广告提示）：无逐字、正常色整行显示。</summary>
+    /// <summary>纯提示行（等待播放/正在找歌词/未找到）：无逐字、正常色整行显示。</summary>
     public void SetHint(string hint)
+    {
+        if (_adHintActive) { _adHintActive = false; ApplyStyle(); }
+        ShowHintCore(hint);
+    }
+
+    /// <summary>
+    /// 广告提示行（v0.8）：文案精简为「♪ 广告播放中」，且颜色固定默认白——
+    /// 不随用户改高亮/文字颜色而变（Sun 要求）。进入/退出该模式时重套一次配色，
+    /// tick 每帧重复调用本方法不会反复重排（SetText 自带同文早退）。
+    /// </summary>
+    public void SetAdHint(string hint)
+    {
+        if (!_adHintActive) { _adHintActive = true; ApplyStyle(); }
+        ShowHintCore(hint);
+    }
+
+    private void ShowHintCore(string hint)
     {
         _lastCurrent = hint;
         _currentLine.SetText(hint);

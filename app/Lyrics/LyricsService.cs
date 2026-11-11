@@ -33,9 +33,11 @@ public required CandidateSearchResult Result { get; init;}
 public sealed class LyricsService
 {
 private readonly IReadOnlyList<ILyricsProvider> _providers;
+private readonly Settings _settings;
 
 public LyricsService(Settings settings)
 {
+_settings = settings;
 _providers = new ILyricsProvider[]
 {
 new KugouProvider(),
@@ -306,7 +308,7 @@ CancellationToken ct)
 if (!MachineTranslate.NeedsTranslation(current)) return null;
 var lines = current.Lines.Select(l => l.Text).ToList();
 List<string>? translated;
-try { translated = await MachineTranslate.TranslateLinesAsync(lines, ct).ConfigureAwait(false); }
+try { translated = await MachineTranslate.TranslateLinesAsync(lines, ct, TranslateConfig.FromSettings(_settings)).ConfigureAwait(false); }
 catch (OperationCanceledException) { throw; }
 catch { return null; }
 if (translated == null) return null;

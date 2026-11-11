@@ -37,6 +37,27 @@ public static class LayoutMath
     public static double CenteredTextX(double containerWidth, double textWidth) =>
         CenterOffset(containerWidth, textWidth);
 
+    // ---------- 悬浮窗按钮带安全区（v0.8） ----------
+    // v0.7 按钮带是 Overlay 顶部居中，但锚点就贴在歌词块顶部——双行时胶囊（28 高按钮 +
+    // 内边距 = 32）正好压住第一行字形上沿（Sun 真机截图实锤）。v0.8 起悬浮窗顶部预留
+    // 一段透明留白专供按钮带：留白高 = 胶囊高 + 安全间隙；歌词栈从留白下方开始排，
+    // 于是「按钮带底边 ≤ 第一行顶边」由构造保证，与单/双行、字号无关。
+
+    /// <summary>按钮带胶囊总高（按钮 28 + 胶囊上下内边距 2×2）。</summary>
+    public const double BandHeight = 32.0;
+
+    /// <summary>按钮带底边与第一行歌词顶边之间的安全间隙。</summary>
+    public const double BandGap = 4.0;
+
+    /// <summary>悬浮窗顶部为按钮带预留的透明留白高。</summary>
+    public const double BandReserveTop = BandHeight + BandGap;
+
+    /// <summary>按钮带在留白区内贴顶放置时的底边 y（相对歌词内容区顶部）。</summary>
+    public static double BandBottom() => BandHeight;
+
+    /// <summary>第一行歌词的顶边 y（= 留白高，歌词栈从这里开始）。</summary>
+    public static double FirstLineTop() => BandReserveTop;
+
     /// <summary>
     /// 译文字号（v0.7 改比例跟随，取代 v0.6 的「原文 −6」固定差）：
     /// 译文字号 = round（原文字号 × 0.62)，下限 11、上限不超过原文 −4；
