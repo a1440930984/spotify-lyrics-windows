@@ -34,6 +34,11 @@ public static class Program
     private static bool _isAd;
     private static string _adKey = "";
     private static string _lastLogSignature = "\0";
+    // v0.7：广告连续段状态机（第一段实锤后，同 pod 内的弱信号段也判广告）
+    private static readonly AdPodTracker _adPod = new();
+    // v0.7：引擎里放的是「显示副本」（繁→简转换后）；原始歌词另存 _rawLyrics，
+    // 开关切换时从原始重新生成显示副本。补译/机翻的换入校验也以原始对象为准。
+    private static Core.Lyrics? _rawLyrics;
 
     // v0.6 新增状态：单实例锁、纯音乐、网络失败延迟重试
     private static Mutex? _singleInstanceMutex;
@@ -73,7 +78,7 @@ public static class Program
         // v0.3：启动先落一行日志，保证 log.txt 必然存在（v0.2 只在广告命中时写，
         // 从未命中就没文件，用户找不到）。路径：%AppData%/SpotifyLyricsWin/log.txt
         AppLog.EnsureFile();
-        AppLog.Write("[启动] SpotifyLyricsWin v0.6 启动");
+        AppLog.Write("[启动] SpotifyLyricsWin v0.7 启动");
 
         // v0.4：先看上次自动更新的结果（Updater 写的 update-result.json），汇报一次后删掉
         var lastResult = UpdateService.ReadResult();
@@ -157,6 +162,7 @@ public static class Program
                 _isInstrumental = false;
                 _instrumentalKey = "";
                 _pendingRetryKey = "";
+                _adPod.Reset();
                 _statusHint = "♪ 等待 Spotify 播放";
                 SyncAdInstrumentalUi();
                 return;
@@ -164,14 +170,19 @@ public static class Program
 
             // 广告识别（启发式）：命中则不取词、不推进，tick 里显示广告提示；结束自动恢复。
             // v0.6：判定带上用户「这不是广告」抑制名单，名单内的曲目永不判广告。
-            var verdict = AdDetector.Check(track, _settings.NotAdKeys);
+            // v0.7：判定结果再过一遍 AdPodTracker（连续段状态机）——第一段实锤后，
+            // 同 pod 内信号变弱的后续段（专辑空但 40s、时长未知等）也能判出；
+            // 且**每段都更新 _adKey 并逐段记日志**（旧逻辑只在 _isAd 由假转真时写 _adKey，
+            // 连播第二段起 Key 对不上，tick 的广告提示会失效——实锤显示缺陷）。
+            var verdict = _adPod.Observe(track, AdDetector.Check(track, _settings.NotAdKeys),
+                TrackInfo.NowMs(), _settings.NotAdKeys);
             if (verdict.IsAd)
             {
-                if (!_isAd)
+                if (!_isAd || _adKey != track.Key)
                 {
                     _isAd = true;
                     _adKey = track.Key;
-                    AppLog.Write($"[广告识别] 标题=「{track.Title}」 歌手=「{track.Artist}」 " +
+                    AppLog.Write($"[广告识别] 段签名={track.Key} 标题=「{track.Title}」 歌手=「{track.Artist}」 " +
                         $"专辑=「{track.Album}」 时长={track.DurationMs}ms 命中规则：{verdict.Rule}");
                     _tray.SetStatus("SpotifyLyrics - 广告播放中");
                 }
@@ -201,7 +212,7 @@ public static class Program
                     _instrumentalKey = track.Key;
                     _fetchCts?.Cancel();
                     _fetchingKey = "";
-                    _engine.Lyrics = null;
+                    _engine.Lyrics = null; _rawLyrics = null;
                     _loadedKey = track.Key; // 占位防重复触发；取消标记时由处理函数清掉
                     _notFound = false;
                     _tray.SetStatus($"SpotifyLyrics - 纯音乐：{track.Title}");
@@ -290,6 +301,19 @@ public static class Program
     }
 
     /// <summary>
+    /// v0.7：把原始歌词生成显示副本。开关开 → 原文行 + 自带译文行繁→简（只转显示，
+    /// 不动缓存/匹配；逐字时间数组复用同一引用、字数 1:1 不变）；关 → 原样。
+    /// </summary>
+    private static Core.Lyrics ToDisplayLyrics(Core.Lyrics raw) =>
+        _settings.ConvertTradToSimp ? LyricsDisplay.ConvertForDisplay(raw) : raw;
+
+    /// <summary>从 _rawLyrics 重生成引擎的显示副本（开关变化时即时生效）。</summary>
+    private static void RefreshDisplayLyrics()
+    {
+        if (_rawLyrics != null) _engine.Lyrics = ToDisplayLyrics(_rawLyrics);
+    }
+
+    /// <summary>
     /// v0.6「这不是广告」（悬浮窗右击菜单 / 托盘共用）：把当前曲 Key 记入抑制名单
     /// （存设置、上限 200），同曲永不再判广告；正在判广告的立刻解除并恢复取词。
     /// </summary>
@@ -332,7 +356,7 @@ public static class Program
             AppLog.Write($"[纯音乐] 用户手动标记：「{t.Title} - {t.Artist}」，停止取词");
             _fetchCts?.Cancel();
             _fetchingKey = "";
-            _engine.Lyrics = null;
+            _engine.Lyrics = null; _rawLyrics = null;
             _isInstrumental = true;
             _instrumentalKey = t.Key;
             _loadedKey = t.Key;
@@ -374,12 +398,26 @@ public static class Program
         _fluentOverrideKeys.Clear();
         if (palette.Id is "pure-black" or "deep-blue")
         {
+            // v0.7 覆写补全：v0.6 只写了两个 Brush 键，且 FluentWindow 开着 Mica 时
+            // 窗口背景根本不走这些键（系统材质罩住），两套主题看着一模一样。
+            // 本版双管齐下：这两套的窗口改走 WindowBackdropType.None（见 Theme.Backdrop），
+            // 覆写键也从「背景 + 卡片背景」补到描边与对应的 Color 键
+            // （库里部分模板引用的是 Color 资源，只写 Brush 会漏）。
             SetOverride("ApplicationBackgroundBrush", palette.Bg);
+            SetColorOverride("ApplicationBackgroundColor", palette.Bg);
             SetOverride("CardBackgroundFillColorDefaultBrush", palette.Panel);
+            SetColorOverride("CardBackgroundFillColorDefault", palette.Panel);
+            SetOverride("CardStrokeColorDefaultBrush", palette.Border);
+            SetColorOverride("CardStrokeColorDefault", palette.Border);
         }
         void SetOverride(string key, Color color)
         {
             res[key] = Theme.Brush(color);
+            _fluentOverrideKeys.Add(key);
+        }
+        void SetColorOverride(string key, Color color)
+        {
+            res[key] = color;
             _fluentOverrideKeys.Add(key);
         }
     }
@@ -392,6 +430,9 @@ public static class Program
     {
         Theme.Apply(_settings.UiTheme);
         ApplyFluentTheme();
+        // v0.7：主题切换后让悬浮窗重申一遍自己的背景铁律（恒透明 + 背景透明度设置），
+        // 保证主题系统无论如何都碰不到悬浮窗背景（与主题彻底解耦的兜底动作）。
+        _floating.ApplyStyle();
         AppLog.Write($"[设置] 界面主题切换为「{Theme.Current.DisplayName}」（{_settings.UiTheme}）");
         if (_manualWindow != null) { var m = _manualWindow; _manualWindow = null; m.Close(); }
         if (_settingsWindow != null)
@@ -416,7 +457,12 @@ public static class Program
             return;
         }
         // v0.2：设置实时生效——每次变更立刻重套悬浮窗样式（落盘由设置窗内的防抖处理）
-        _settingsWindow.LiveChanged += () => _floating.ApplyStyle();
+        // v0.7：顺带从原始歌词重生成显示副本（「繁体转简体」开关一切换，当前行立刻变）
+        _settingsWindow.LiveChanged += () =>
+        {
+            _floating.ApplyStyle();
+            RefreshDisplayLyrics();
+        };
         _settingsWindow.OpenLogRequested += OpenLogFile;
         // v0.4：更新检查/安装由主程序编排，结果推回设置窗
         _settingsWindow.CheckUpdateRequested += async () =>
@@ -566,7 +612,8 @@ public static class Program
             line = $"[SMTC] 标题=「{track.Title}」 歌手=「{track.Artist}」 专辑=「{track.Album}」 " +
                    $"时长={(track.DurationMs > 0 ? (track.DurationMs / 1000) + "s" : "未知")} " +
                    $"封面={(track.HasCover ? "有" : "无")} 状态={(track.IsPlaying ? "播放" : "暂停")} " +
-                   $"判定={(v.IsAd ? $"广告（{v.Rule}）" : "歌曲")} 动作[{controls}]";
+                   $"判定={(v.IsAd ? $"广告（{v.Rule}）" : "歌曲")} " +
+                   $"广告段pod={(_adPod.IsPodActive(TrackInfo.NowMs()) ? "开" : "关")} 动作[{controls}]";
         }
         if (signature == _lastLogSignature) return;
         _lastLogSignature = signature;
@@ -595,7 +642,8 @@ public static class Program
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var outcome = await _service.FetchCandidateAsync(candidate, track, cts.Token);
             if (outcome == null) return false;
-            _engine.Lyrics = outcome.Lyrics;
+            _rawLyrics = outcome.Lyrics;
+            _engine.Lyrics = ToDisplayLyrics(outcome.Lyrics);
             _loadedKey = track.Key;
             _notFound = false;
             _tray.SetStatus($"SpotifyLyrics - 歌词：{outcome.SourceName}（手动）｜{track.Title}");
@@ -658,7 +706,8 @@ public static class Program
                 var outcome = finalReport?.Outcome;
                 if (outcome != null)
                 {
-                    _engine.Lyrics = outcome.Lyrics;
+                    _rawLyrics = outcome.Lyrics;
+                    _engine.Lyrics = ToDisplayLyrics(outcome.Lyrics);
                     _loadedKey = key;
                     _pendingRetryKey = "";
                     _tray.SetStatus($"SpotifyLyrics - 歌词：{outcome.SourceName}｜{track.Title}");
@@ -670,6 +719,7 @@ public static class Program
                 else
                 {
                     _engine.Lyrics = null;
+                    _rawLyrics = null;
                     _notFound = true;
                     _tray.SetStatus($"SpotifyLyrics - 未找到歌词：{track.Title}");
                     if (finalReport?.Failure == LyricsService.FetchFailureKind.Network)
@@ -691,8 +741,10 @@ public static class Program
     }
 
     /// <summary>
-    /// v0.6 后台补译：主源歌词没有可用译文且设置允许时，向网易云补 tlyric，
-    /// 补到后若仍是同一首歌、且引擎里还是同一份歌词对象，就无缝换上（并已写缓存）。
+    /// 后台补译（v0.6 起）：主源歌词没有可用译文且设置允许时，向网易云补 tlyric，
+    /// 补到后若仍是同一首歌、且原始歌词对象没被换掉，就无缝换上（并已写缓存）。
+    /// v0.7 第二级兜底：网易云也没有时，若「无译文时自动翻译」开关开着，再走机器翻译
+    /// （逐行机翻成简体中文、写 .trans.lrc 缓存并在日志标 machine 来源）。
     /// 全程后台进行，不阻塞首屏显示；失败静默（下次取词还会再试缓存/主源）。
     /// </summary>
     private static void MaybeBackfillTranslation(TrackInfo track, FetchOutcome outcome)
@@ -700,18 +752,22 @@ public static class Program
         if (!_settings.ShowTranslation) return;
         if (LyricsService.HasUsableTranslation(outcome.Lyrics)) return;
         string key = track.Key;
-        var original = outcome.Lyrics;
+        var original = outcome.Lyrics; // 原始歌词（未转简体的那份，换入校验以它为准）
         _ = Task.Run(async () =>
         {
             try
             {
-                var merged = await _service.FetchTranslationBackupAsync(track, original, CancellationToken.None);
+                Core.Lyrics? merged = await _service.FetchTranslationBackupAsync(track, original, CancellationToken.None);
+                if (merged == null && _settings.AutoTranslate)
+                    merged = await _service.MachineTranslateAsync(track, original, CancellationToken.None);
                 if (merged == null) return;
+                var rawMerged = merged;
                 Application.Current?.Dispatcher.Invoke(() =>
                 {
                     if (_tracker.Current?.Key != key) return;
-                    if (!ReferenceEquals(_engine.Lyrics, original)) return; // 已被手动选词等换掉
-                    _engine.Lyrics = merged;
+                    if (!ReferenceEquals(_rawLyrics, original)) return; // 已被手动选词等换掉
+                    _rawLyrics = rawMerged;
+                    _engine.Lyrics = ToDisplayLyrics(rawMerged);
                 });
             }
             catch (Exception ex) { AppLog.LogException("后台补译", ex); }

@@ -25,7 +25,7 @@ namespace SpotifyLyricsWin.Ui;
 ///   字体本地化名 + 每项自身字体预览 + 未展开时滚轮不改选、令牌改「可选」（仓库已转公开）、
 ///   纯音乐标记名单查看/清空；
 /// - 关键设置变更记日志（主题/字体/开关/令牌只记「已更新」不记值）。
-/// 条目照复刻规格：逐字开关、译文开关、字号 12~36、背景 0~100、高亮/文字色
+/// 条目照复刻规格：逐字开关、译文开关、字号 12~60（v0.7 上限放宽）、背景 0~100、高亮/文字色
 /// （hex + 色块 + 颜色盘 + 12 预设）、偏移 ±100ms（±30s 钳制）；另有字体、单/双行、
 /// 锁定位置、Musixmatch Key、自动更新、诊断日志。
 /// </summary>
@@ -34,6 +34,8 @@ public sealed class SettingsWindow : FluentWindow
     private readonly Settings _settings;
     private readonly ToggleSwitch _wordByWord;
     private readonly ToggleSwitch _showTrans;
+    private readonly ToggleSwitch _simpSwitch;
+    private readonly ToggleSwitch _autoTransSwitch;
     private readonly ToggleSwitch _lockSwitch;
     private readonly RadioButton _doubleLine;
     private readonly RadioButton _singleLine;
@@ -77,10 +79,10 @@ public sealed class SettingsWindow : FluentWindow
     /// <summary>主题下拉项：显示名 + 调色板 id（顺序与 Theme.Palettes 的推荐顺序一致）。</summary>
     private static readonly (string Id, string Display)[] ThemeChoices =
     {
-        ("spotify-dark", "Spotify 深色（默认）"),
+        ("light", "浅色（默认）"),
+        ("spotify-dark", "Spotify 深色"),
         ("pure-black", "纯黑（OLED）"),
-        ("deep-blue", "深蓝"),
-        ("light", "浅色")
+        ("deep-blue", "深蓝")
     };
 
     /// <summary>字体下拉项：存真实字体名 Source，显示本地化名 Display，并以自身字体渲染。</summary>
@@ -123,14 +125,15 @@ public sealed class SettingsWindow : FluentWindow
     public SettingsWindow(Settings settings)
     {
         _settings = settings;
-        Title = "Spotify 歌词 · 设置 v0.6";
+        Title = "Spotify 歌词 · 设置 v0.7";
         Width = 500;
         Height = 760;
         MinWidth = 440;
         MinHeight = 480;
         ResizeMode = ResizeMode.CanResizeWithGrip;
         ExtendsContentIntoTitleBar = true;
-        WindowBackdropType = WindowBackdropType.Mica;
+        // v0.7：纯黑/深蓝两套关 Mica（系统材质不吃背景覆写，两套会被罩成一个样），其余保留 Mica
+        WindowBackdropType = Theme.Backdrop;
 
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -176,6 +179,10 @@ public sealed class SettingsWindow : FluentWindow
             v => { _settings.WordByWordEnabled = v; AppLog.WriteLimited("set-wordbyword", $"[设置] 逐字扫光 = {v}", 5000); });
         _showTrans = AddSwitchRow(look, "显示译文（歌词源带译文时）",
             v => { _settings.ShowTranslation = v; AppLog.WriteLimited("set-showtrans", $"[设置] 显示译文 = {v}", 5000); });
+        _simpSwitch = AddSwitchRow(look, "繁体转简体显示（原文与自带译文，只转显示不改原文）",
+            v => { _settings.ConvertTradToSimp = v; AppLog.WriteLimited("set-simp", $"[设置] 繁体转简体 = {v}", 5000); });
+        _autoTransSwitch = AddSwitchRow(look, "无译文时自动翻译成中文（机器翻译，所有语种）",
+            v => { _settings.AutoTranslate = v; AppLog.WriteLimited("set-autotrans", $"[设置] 无译文自动翻译 = {v}", 5000); });
         _lockSwitch = AddSwitchRow(look, "锁定悬浮窗位置（锁定后拖不动）",
             v => _settings.PositionLocked = v);
 
@@ -189,10 +196,10 @@ public sealed class SettingsWindow : FluentWindow
         lineRow.Children.Add(_singleLine);
         look.Children.Add(lineRow);
 
-        look.Children.Add(new TextBlock { Text = "歌词字号（12 ~ 36，长句会自动缩小）", Margin = new Thickness(0, 10, 0, 2), FontSize = 13.5 });
+        look.Children.Add(new TextBlock { Text = "歌词字号（12 ~ 60，长句会自动缩小）", Margin = new Thickness(0, 10, 0, 2), FontSize = 13.5 });
         _fontSizeBox = new NumberBox
         {
-            Minimum = 12, Maximum = 36, SmallChange = 1,
+            Minimum = 12, Maximum = 60, SmallChange = 1,
             SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline
         };
         _fontSizeBox.ValueChanged += (_, _) =>
@@ -253,6 +260,8 @@ public sealed class SettingsWindow : FluentWindow
         _fontCombo = new ComboBox { Margin = new Thickness(0, 6, 0, 0), ItemTemplate = FontItemTemplate() };
         var choices = Fonts.SystemFontFamilies
             .GroupBy(f => f.Source).Select(g => g.First())
+            // v0.7：剔除符号/图标字体（Wingdings/Symbol/MDL2 类，渲染歌词是乱码方块）
+            .Where(f => !FontFilter.IsSymbolFont(f.Source))
             .Select(f => new FontChoice { Source = f.Source, Family = f, Display = LocalizedFontName(f) })
             .OrderBy(c => c.Display).ToList();
         foreach (var c in choices) _fontCombo.Items.Add(c);
@@ -449,11 +458,33 @@ public sealed class SettingsWindow : FluentWindow
     }
 
     /// <summary>
-    /// v0.6 滚轮守卫：ComboBox 未展开时屏蔽 MouseWheel 改选（用户实测：鼠标悬停在字体框上
-    /// 滚页面会把字体滚掉）。展开时滚轮归下拉列表自己用，不拦。
+    /// 滚轮守卫（v0.7 重做）：ComboBox 未展开时不能让滚轮改选（v0.6 已防），
+    /// 但也不能吞事件——v0.6 直接 Handled 导致鼠标经过下拉框时页面滚动「卡住」。
+    /// 现在把滚动量转发给祖先 ScrollViewer（页面照常滚动）后再 Handled 防改选；
+    /// 展开时不拦，滚轮归下拉列表。决策/偏移公式在 Core.WheelForward（无头测试覆盖）。
     /// </summary>
     private static void GuardWheel(ComboBox combo) =>
-        combo.PreviewMouseWheel += (_, e) => { if (!combo.IsDropDownOpen) e.Handled = true; };
+        combo.PreviewMouseWheel += (_, e) =>
+        {
+            if (WheelForward.Decide(combo.IsDropDownOpen)
+                == WheelForward.Action.LetComboHandle) return;
+            var sv = FindAncestor<ScrollViewer>(combo);
+            if (sv != null)
+                sv.ScrollToVerticalOffset(
+                    WheelForward.NewOffset(sv.VerticalOffset, e.Delta, sv.ScrollableHeight));
+            e.Handled = true;
+        };
+
+    private static T? FindAncestor<T>(DependencyObject node) where T : DependencyObject
+    {
+        var cur = VisualTreeHelper.GetParent(node);
+        while (cur != null)
+        {
+            if (cur is T hit) return hit;
+            cur = VisualTreeHelper.GetParent(cur);
+        }
+        return null;
+    }
 
     /// <summary>字体项模板：显示本地化名，且每项以其自身字体渲染（纯代码工厂构建）。</summary>
     private static DataTemplate FontItemTemplate()
@@ -575,6 +606,10 @@ public sealed class SettingsWindow : FluentWindow
                 Margin = new Thickness(0, 0, 6, 6),
                 Background = new SolidColorBrush(c),
                 BorderBrush = Theme.BorderBrush,
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(0),
+                // v0.7：扁平模板——原生模板悬停会透出底色、颜色铺不满（与颜色盘窗同修）
+                Template = Theme.FlatSwatchTemplate(),
                 Tag = p
             };
             btn.Click += (_, _) => row.Hex = (string)btn.Tag;
@@ -634,6 +669,8 @@ public sealed class SettingsWindow : FluentWindow
     {
         _wordByWord.IsChecked = _settings.WordByWordEnabled;
         _showTrans.IsChecked = _settings.ShowTranslation;
+        _simpSwitch.IsChecked = _settings.ConvertTradToSimp;
+        _autoTransSwitch.IsChecked = _settings.AutoTranslate;
         _lockSwitch.IsChecked = _settings.PositionLocked;
         _doubleLine.IsChecked = !_settings.SingleLineMode;
         _singleLine.IsChecked = _settings.SingleLineMode;

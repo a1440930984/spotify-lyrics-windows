@@ -5,7 +5,6 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
-using System.Windows.Threading;
 using SpotifyLyricsWin.Core;
 
 namespace SpotifyLyricsWin.Ui;
@@ -13,42 +12,39 @@ namespace SpotifyLyricsWin.Ui;
 /// <summary>
 /// 桌面悬浮歌词窗（参数照复刻规格）：
 /// 无边框、透明、置顶、不进任务栏；当前行（渐变扫光）+ 译文行 + 下一行；
-/// 长句缩字号、切行上滑淡入、停播淡出 0.38、拖动阈值 8 保存位置、轻点显按钮 3 秒。
+/// 长句缩字号、切行上滑淡入、停播淡出 0.38、拖动阈值 8 保存位置。
 /// v0.2 新增：锁定位置按钮（挨着关闭键）、右击菜单、单/双行模式、
 /// 窗口宽度按内容自适应（居中以当前行文本为准，修 v0.1 单行不居中）。
-/// v0.3：按钮组不再覆盖歌词——显形时窗口向上扩出一条 30px 按钮带
-/// （Top 同步上移，歌词区位置像素不动）；单/双行切换时保持窗口垂直中心稳定，
-/// 单行模式当前行水平+垂直双居中（行高/居中公式见 Core.LayoutMath）。
+/// v0.7 按钮带重做：改 Overlay 绝对层（悬浮窗顶部居中固定锚点，**不占布局高度**，
+/// 单/双行、长短句位置恒定——v0.6 把带放进布局行，双行时会被歌词顶上去）；
+/// 显隐改纯悬停语义：鼠标进歌词区才淡入（120ms）、离开立即淡出（80ms 后收起），
+/// 不再有 3 秒定时与高度动画。锁定状态下悬停也不显示（鼠标本就为拖动/穿透让路，
+/// 解锁走右击菜单/托盘的「锁定位置」）。
+/// v0.7 译文行换成渐变行控件：与当前行共用行进度做整行比例扫光（按译文字数取整到字粒度，
+/// 近似逐字）；译文字号改比例跟随（Core.LayoutMath.TranslationFontSize）。
+/// v0.7 背景与主题彻底解耦：Window.Background 恒为透明（ApplyStyle 每次重申），
+/// 可见背景只有根 Border 一处、且只由「背景透明度」设置决定——主题切换走的是另一套
+/// 资源系统，碰不到这里（v0.6 真机出现过切主题后悬浮窗背景变实、改透明度无效：
+/// ApplyStyle 当时只写根 Border、从不重申 Window.Background，一旦被外部改动就回不来）。
 /// </summary>
 public sealed class FloatingWindow : Window
 {
     private readonly Settings _settings;
     private readonly Border _rootBorder;
     private readonly GradientLyricLine _currentLine;
-    private readonly TextBlock _translationBlock;
+    private readonly GradientLyricLine _translationLine;
     private readonly TextBlock _nextBlock;
     private readonly Button _closeButton;
     private readonly Button _lockButton;
     private readonly MenuItem _lockMenuItem;
-    private readonly DispatcherTimer _hideButtonsTimer;
-    private readonly RowDefinition _bandRow;
-
-    private const double BandHeight = 34;
-    /// <summary>按钮带最小宽度：两钮 36+2+36 + 胶囊内边距 5×2 + 描边 ≈ 86，取 92 留余量。
-    /// 窗口宽度取「歌词行宽」与它的较大者（v0.6），按钮带又恒居中，锁钮永远在窗口中轴线上。</summary>
-    private const double BandMinWidth = 92;
     private Border _bandCapsule = null!;
     private MenuItem _notAdMenuItem = null!;
     private MenuItem _instrumentalMenuItem = null!;
     private bool _bandShown;
-    private double _lastHeight = -1;
-    // v0.6 按钮带动画（约 180ms，代码驱动）：_bandApplied 是已应用的带高（0~BandHeight），
-    // 动画期间 SizeChanged 跳过「保持垂直中心」逻辑（Top 由动画自己逐帧补偿）。
-    private bool _animatingBand;
-    private double _bandApplied;
-    private double _bandAnimFrom, _bandAnimTo;
-    private long _bandAnimStartTick;
-    private DispatcherTimer? _bandAnimTimer;
+
+    /// <summary>按钮带最小宽度：两钮 36+2+36 + 胶囊内边距 5×2 + 描边 ≈ 86，取 92 留余量。
+    /// 窗口宽度取「歌词行宽」与它的较大者，按钮带又恒居中，锁钮永远在窗口中轴线上。</summary>
+    private const double BandMinWidth = 92;
 
     private string _lastCurrent = "\0";
     private bool _dimmed;
@@ -97,14 +93,14 @@ public sealed class FloatingWindow : Window
 
         _currentLine = new GradientLyricLine { Effect = shadow };
 
-        _translationBlock = new TextBlock
+        // v0.7：译文用渐变行控件（与当前行同机制：按进度做字粒度渐变扫光）；
+        // 整体再压一层 0.9 不透明度，让它视觉上从属于原文行。
+        _translationLine = new GradientLyricLine
         {
-            TextAlignment = TextAlignment.Center,
-            TextWrapping = TextWrapping.Wrap,
-            MaxHeight = 60,
+            Effect = shadow,
+            Opacity = 0.9,
             Margin = new Thickness(0, 3, 0, 0),
-            Visibility = Visibility.Collapsed,
-            Effect = shadow
+            Visibility = Visibility.Collapsed
         };
         _nextBlock = new TextBlock
         {
@@ -117,12 +113,11 @@ public sealed class FloatingWindow : Window
 
         var stack = new StackPanel();
         stack.Children.Add(_currentLine);
-        stack.Children.Add(_translationBlock);
+        stack.Children.Add(_translationLine);
         stack.Children.Add(_nextBlock);
 
-        // ---- 按钮组：锁定 + 关闭（v0.3 移到独立按钮带，不再压在歌词上） ----
-        // v0.5：按钮带改深色半透明胶囊衬底 + 图标白色描边带深色阴影——
-        // 用户反馈在白色背景下旧版的裸图标「跟没有一样」，胶囊底让白底黑底都清晰。
+        // ---- 按钮组：锁定 + 关闭（Overlay 层，悬停才显示） ----
+        // 胶囊衬底保留 v0.5 的决定：深色半透明底让图标在白底黑底下都清晰。
         var buttonShadow = new DropShadowEffect
         {
             Color = Colors.Black,
@@ -145,7 +140,7 @@ public sealed class FloatingWindow : Window
             ToolTip = "锁定/解锁位置",
             Effect = buttonShadow,
             FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-            // v0.6：幽灵按钮——自绘模板 + 无焦点框，杜绝默认模板的选中/聚焦系统底色
+            // 幽灵按钮（v0.6）：自绘模板 + 无焦点框，杜绝默认模板的选中/聚焦系统底色
             Template = GhostButtonTemplate(),
             FocusVisualStyle = null,
             Focusable = false
@@ -181,24 +176,20 @@ public sealed class FloatingWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(16),
             Padding = new Thickness(5, 2, 5, 2),
-            // v0.6：按钮带改水平居中——窗口宽度 = max(歌词行宽, 按钮带宽)（见 AdaptWidth），
-            // 歌词行本身也居中，两者同在窗口中轴线上，长短句切换时锁钮位置纹丝不动。
             HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 2, 0, 0),
+            Opacity = 0,
             Visibility = Visibility.Collapsed,
             Child = buttons
         };
 
-        // 两行布局：第 0 行按钮带（默认高 0，显形时扩到 BandHeight）、第 1 行歌词区
-        _bandRow = new RowDefinition { Height = new GridLength(0) };
+        // v0.7 布局：单层 Grid —— 歌词栈是唯一内容（决定窗口高度），
+        // 按钮带 capsule 叠在同一 Grid 上（顶部居中），不占任何布局高度。
         var grid = new Grid();
-        grid.RowDefinitions.Add(_bandRow);
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        Grid.SetRow(capsule, 0);
-        Grid.SetRow(stack, 1);
-        _bandCapsule = capsule;
-        grid.Children.Add(capsule);
         grid.Children.Add(stack);
+        grid.Children.Add(capsule);
+        _bandCapsule = capsule;
 
         _rootBorder = new Border
         {
@@ -246,34 +237,25 @@ public sealed class FloatingWindow : Window
         };
         ContextMenu = menu;
 
-        _hideButtonsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-        _hideButtonsTimer.Tick += (_, _) =>
-        {
-            SetBand(false);
-            _hideButtonsTimer.Stop();
-        };
-
-        // 内容高度变化（单/双行切换、字号变化）时保持窗口垂直中心不动，
-        // 用户感知的歌词位置不跳。按钮带动画期间高度由动画逐帧驱动并自行补偿 Top，这里豁免。
+        // 内容高度变化（单/双行切换、字号变化）时保持窗口垂直中心不动，用户感知的歌词位置不跳。
+        // 按钮带已移出布局流，不再有带高动画需要豁免。
+        double lastHeight = -1;
         SizeChanged += (_, e) =>
         {
-            if (_animatingBand)
+            if (lastHeight > 0 && !_dragging &&
+                Math.Abs(e.NewSize.Height - lastHeight) > 0.5 && !double.IsNaN(Top))
             {
-                _lastHeight = e.NewSize.Height;
-                return;
+                Top += (lastHeight - e.NewSize.Height) / 2.0;
             }
-            if (_lastHeight > 0 && !_dragging &&
-                Math.Abs(e.NewSize.Height - _lastHeight) > 0.5 && !double.IsNaN(Top))
-            {
-                Top += (_lastHeight - e.NewSize.Height) / 2.0;
-            }
-            _lastHeight = e.NewSize.Height;
+            lastHeight = e.NewSize.Height;
         };
 
         MouseLeftButtonDown += OnMouseDown;
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnMouseUp;
-        MouseEnter += (_, _) => RevealButtons();
+        // v0.7 悬停显隐：进歌词区淡入、离开立即淡出；锁定状态不显示（解锁走右击菜单/托盘）。
+        MouseEnter += (_, _) => { if (!_settings.PositionLocked) ShowBand(); };
+        MouseLeave += (_, _) => HideBand();
         MouseDoubleClick += (_, _) => SettingsRequested?.Invoke();
 
         // 初始位置：设置里存的坐标，或顶部居中（安卓 floatingY 默认 120）
@@ -296,7 +278,8 @@ public sealed class FloatingWindow : Window
         _settings.PositionLocked = !_settings.PositionLocked;
         _settings.RequestSave();
         UpdateLockButton();
-        RevealButtons();
+        // 刚锁定：按钮带按新规则立刻收起（锁定后悬停也不显示）；刚解锁：保持显示方便确认
+        if (_settings.PositionLocked) HideBand(); else ShowBand();
     }
 
     private void UpdateLockButton()
@@ -309,7 +292,7 @@ public sealed class FloatingWindow : Window
     }
 
     /// <summary>
-    /// v0.6 幽灵按钮模板（纯代码构建）：默认 Button 模板在聚焦/按下/悬停时会画系统
+    /// 幽灵按钮模板（v0.6，纯代码构建）：默认 Button 模板在聚焦/按下/悬停时会画系统
     /// 描边与底色，在半透明悬浮窗上很出戏（用户实测反馈）。换成全自绘模板：
     /// 透明底、圆角 6、无焦点框；悬停/按下只在按钮自身范围叠一层白色微光（14%/22%）。
     /// </summary>
@@ -339,66 +322,33 @@ public sealed class FloatingWindow : Window
         return template;
     }
 
-    private void RevealButtons()
+    // ---------- 按钮带显隐（v0.7：悬停语义，Overlay 层只动透明度） ----------
+
+    private void ShowBand()
     {
-        SetBand(true);
-        _hideButtonsTimer.Stop();
-        _hideButtonsTimer.Start();
+        if (_bandShown) return;
+        _bandShown = true;
+        _bandCapsule.Visibility = Visibility.Visible;
+        _closeButton.Visibility = Visibility.Visible;
+        _lockButton.Visibility = Visibility.Visible;
+        _bandCapsule.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(120)));
     }
 
-    /// <summary>
-    /// 按钮带显/隐。v0.3 起按钮带扩高时 Top 反向补偿，歌词区屏幕位置像素不动；
-    /// v0.6 改为约 180ms 代码动画（DispatcherTimer 逐帧，EaseOut 三次方）：
-    /// 带高 0↔BandHeight 平滑增减、Top 按已应用增量逐帧补偿、胶囊同步淡入淡出，
-    /// 不再一帧跳变。动画中途反向调用时从当前已应用高度接着走，不回跳。
-    /// 拖动判定不含按钮本身（见 IsOnButton），带内空白区仍可拖。
-    /// </summary>
-    private void SetBand(bool show)
+    private void HideBand()
     {
-        if (_bandShown == show && !_animatingBand) return;
-        _bandShown = show;
-        if (show)
+        if (!_bandShown) return;
+        _bandShown = false;
+        // 离开立即消失：80ms 淡出后收起，不拖泥带水（Sun 明确要求）
+        var anim = new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(80));
+        anim.Completed += (_, _) =>
         {
-            _bandCapsule.Visibility = Visibility.Visible;
-            _closeButton.Visibility = Visibility.Visible;
-            _lockButton.Visibility = Visibility.Visible;
-        }
-        _bandAnimFrom = _bandApplied;
-        _bandAnimTo = show ? BandHeight : 0;
-        _bandAnimStartTick = Environment.TickCount64;
-        _animatingBand = true;
-        if (_bandAnimTimer == null)
-        {
-            _bandAnimTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
-            _bandAnimTimer.Tick += OnBandAnimTick;
-        }
-        _bandAnimTimer.Stop();
-        _bandAnimTimer.Start();
-    }
-
-    private void OnBandAnimTick(object? sender, EventArgs e)
-    {
-        const double DurationMs = 180;
-        double p = Math.Clamp((Environment.TickCount64 - _bandAnimStartTick) / DurationMs, 0, 1);
-        double eased = 1 - Math.Pow(1 - p, 3); // EaseOutCubic
-        double h = _bandAnimFrom + (_bandAnimTo - _bandAnimFrom) * eased;
-        double step = h - _bandApplied;
-        _bandApplied = h;
-        _bandRow.Height = new GridLength(Math.Max(0, h));
-        _bandCapsule.Opacity = BandHeight > 0 ? h / BandHeight : 0;
-        // 带在歌词上方扩/收：Top 反向补偿已应用增量，歌词区屏幕位置不动
-        if (step != 0 && !double.IsNaN(Top) && IsLoaded) Top -= step;
-        if (p >= 1)
-        {
-            _bandAnimTimer?.Stop();
-            _animatingBand = false;
-            if (_bandAnimTo <= 0)
-            {
-                _bandCapsule.Visibility = Visibility.Collapsed;
-                _closeButton.Visibility = Visibility.Collapsed;
-                _lockButton.Visibility = Visibility.Collapsed;
-            }
-        }
+            if (_bandShown) return; // 淡出途中又悬停回来了
+            _bandCapsule.Visibility = Visibility.Collapsed;
+            _closeButton.Visibility = Visibility.Collapsed;
+            _lockButton.Visibility = Visibility.Collapsed;
+        };
+        _bandCapsule.BeginAnimation(OpacityProperty, anim);
     }
 
     // ---------- 样式 ----------
@@ -415,25 +365,29 @@ public sealed class FloatingWindow : Window
 
     public void ApplyStyle()
     {
+        // v0.7 解耦铁律：窗口本体背景恒透明，每次套样式都重申——主题系统或任何外部
+        // 改动都不能让悬浮窗长出底色；可见背景只有下方根 Border 一处。
+        Background = Brushes.Transparent;
+
         var hi = ParseHex(_settings.HighlightColorHex, Color.FromArgb(0xFF, 0x1E, 0xD7, 0x60));
         var normal = ParseHex(_settings.TextColorHex, Colors.White);
         double size = _settings.FontSize;
 
         _currentLine.Configure(hi, normal, size, _settings.FontFamily);
 
-        var ff = new FontFamily(_settings.FontFamily);
-        _translationBlock.FontFamily = ff;
-        _translationBlock.FontWeight = FontWeights.Bold;
-        _translationBlock.FontSize = Math.Max(9, size - 6);   // 译文 -6，下限 9
-        _translationBlock.Foreground = new SolidColorBrush(normal);
-        _translationBlock.Opacity = 0.78;
+        // v0.7：译文字号比例跟随（round（原文 × 0.62)，钳制规则见 LayoutMath.TranslationFontSize）；
+        // 译文渐变行与当前行同一套配色（已唱=高亮色、未唱=普通色），进度由 SetProgress 同步推进。
+        _translationLine.Configure(hi, normal,
+            LayoutMath.TranslationFontSize(size), _settings.FontFamily);
 
+        var ff = new FontFamily(_settings.FontFamily);
         _nextBlock.FontFamily = ff;
         _nextBlock.FontWeight = FontWeights.Bold;
         _nextBlock.FontSize = Math.Max(10, size - 4);         // 下一行 -4，下限 10
         _nextBlock.Foreground = new SolidColorBrush(normal);
         if (!_dimmed) _nextBlock.Opacity = 0.6;
 
+        // 唯一的背景来源：「背景透明度」设置（0 = 全透明纯文字）
         int alpha = _settings.BgAlphaPercent;
         _rootBorder.Background = alpha <= 0
             ? Brushes.Transparent
@@ -466,9 +420,9 @@ public sealed class FloatingWindow : Window
         double needed = _currentLine.NaturalWidth();
         if (_nextBlock.Visibility == Visibility.Visible)
             needed = Math.Max(needed, MeasurePlain(_nextBlock.Text, Math.Max(10, _settings.FontSize - 4)));
-        if (_translationBlock.Visibility == Visibility.Visible)
-            needed = Math.Max(needed, MeasurePlain(_translationBlock.Text, Math.Max(9, _settings.FontSize - 6)));
-        // v0.6：窗口宽度不小于按钮带宽——按钮带居中、歌词居中，长短句共用同一中轴，
+        if (_translationLine.Visibility == Visibility.Visible)
+            needed = Math.Max(needed, _translationLine.NaturalWidth());
+        // 窗口宽度不小于按钮带宽——按钮带居中、歌词居中，长短句共用同一中轴，
         // 锁钮位置与歌词长度彻底脱钩（用户验收点）。
         needed = Math.Max(needed, BandMinWidth);
         needed += 12 + 2; // 根内边距 6×2 + 余量
@@ -495,8 +449,8 @@ public sealed class FloatingWindow : Window
         _nextBlock.Visibility = showNext ? Visibility.Visible : Visibility.Collapsed;
 
         string tr = _settings.ShowTranslation ? translation ?? "" : "";
-        _translationBlock.Text = tr;
-        _translationBlock.Visibility = string.IsNullOrWhiteSpace(tr)
+        _translationLine.SetText(tr);
+        _translationLine.Visibility = string.IsNullOrWhiteSpace(tr)
             ? Visibility.Collapsed : Visibility.Visible;
 
         AdaptWidth();
@@ -526,13 +480,17 @@ public sealed class FloatingWindow : Window
         _currentLine.SetProgress(0f, false);
         _nextBlock.Text = "";
         _nextBlock.Visibility = Visibility.Collapsed;
-        _translationBlock.Visibility = Visibility.Collapsed;
+        _translationLine.SetText("");
+        _translationLine.Visibility = Visibility.Collapsed;
         AdaptWidth();
     }
 
     public void SetProgress(float fraction, bool wordByWord)
     {
         _currentLine.SetProgress(fraction, wordByWord);
+        // v0.7：译文与当前行共用行进度扫光（渐变行内部按译文自身字数取字粒度边界）
+        if (_translationLine.Visibility == Visibility.Visible)
+            _translationLine.SetProgress(fraction, wordByWord);
     }
 
     /// <summary>停播/无会话/广告：整块淡出到 0.38；恢复播放回到 1。</summary>
@@ -563,7 +521,7 @@ public sealed class FloatingWindow : Window
     private void OnMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (IsOnButton(e)) return;            // 按钮自己处理点击
-        if (_settings.PositionLocked) return; // 锁定：整窗不可拖（按钮仍可点）
+        if (_settings.PositionLocked) return; // 锁定：整窗不可拖（菜单仍可开、解锁在菜单里）
         _mouseDown = true;
         _dragging = false;
         _dragStartScreen = PointToScreen(e.GetPosition(this));
@@ -599,10 +557,10 @@ public sealed class FloatingWindow : Window
             _settings.FloatingY = Top;
             _settings.RequestSave();
         }
-        else if (!IsOnButton(e))
+        else if (!IsOnButton(e) && !_settings.PositionLocked)
         {
-            // 轻点：显形按钮组，3 秒后自动藏回去
-            RevealButtons();
+            // 轻点：也显形按钮组（鼠标还在窗内，悬停语义下本就该显示；离开时 MouseLeave 收起）
+            ShowBand();
         }
         _dragging = false;
     }

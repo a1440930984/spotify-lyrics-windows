@@ -12,7 +12,7 @@ public sealed class Settings
     public bool WordByWordEnabled { get; set; } = true;
     public bool FloatingEnabled { get; set; } = true;
     public bool ShowTranslation { get; set; } = true;
-    public int FontSize { get; set; } = 18;                 // 12~36
+    public int FontSize { get; set; } = 18;                 // 12~60（v0.7 上限 36→60，给大屏留余量）
     public string TextColorHex { get; set; } = "#FFFFFFFF"; // #AARRGGBB
     public string HighlightColorHex { get; set; } = "#FF1ED760";
     public int BgAlphaPercent { get; set; } = 0;            // 0~100
@@ -37,8 +37,18 @@ public sealed class Settings
     /// <summary>v0.5 新增：手动选词窗位置记忆（颜色盘明确不记忆，每次居中于所有者）</summary>
     public double? ManualWindowX { get; set; }
     public double? ManualWindowY { get; set; }
-    /// <summary>v0.6 新增：界面主题 id（spotify-dark / pure-black / deep-blue / light），见 Ui.Theme.Palettes</summary>
-    public string UiTheme { get; set; } = "spotify-dark";
+    /// <summary>
+    /// 界面主题 id（spotify-dark / pure-black / deep-blue / light），见 Ui.Theme.Palettes。
+    /// v0.7：新装默认改浅色（Sun 拍板）；已存设置的用户读到的仍是自己存的值，不受影响。
+    /// </summary>
+    public string UiTheme { get; set; } = "light";
+    /// <summary>v0.7 新增：无自带译文时自动机器翻译成中文兜底（默认开）</summary>
+    public bool AutoTranslate { get; set; } = true;
+    /// <summary>
+    /// v0.7 新增：繁体转简体显示（默认开）。开时显示层把原文行 + 自带译文行按字转简体，
+    /// 只转显示副本、不动缓存与匹配；关则原样显示（有些歌就是要看繁体原词）。
+    /// </summary>
+    public bool ConvertTradToSimp { get; set; } = true;
     /// <summary>
     /// v0.6 新增：纯音乐标记（曲目 Key 集合，借鉴 LyricFlow instrumentalKeys，上限 500，超限淘汰最旧）。
     /// 命中标记的曲目不再联网取词，悬浮窗显示「纯音乐」提示。
@@ -52,13 +62,13 @@ public sealed class Settings
 
     public void Normalize()
     {
-        FontSize = Math.Clamp(FontSize, 12, 36);
+        FontSize = Math.Clamp(FontSize, 12, 60);
         BgAlphaPercent = Math.Clamp(BgAlphaPercent, 0, 100);
         LyricsOffsetMs = Math.Clamp(LyricsOffsetMs, -30000, 30000);
         if (!IsValidHex(TextColorHex)) TextColorHex = "#FFFFFFFF";
         if (!IsValidHex(HighlightColorHex)) HighlightColorHex = "#FF1ED760";
         if (string.IsNullOrWhiteSpace(FontFamily)) FontFamily = "Microsoft YaHei UI";
-        if (string.IsNullOrWhiteSpace(UiTheme)) UiTheme = "spotify-dark";
+        if (string.IsNullOrWhiteSpace(UiTheme)) UiTheme = "light";
         InstrumentalKeys ??= new List<string>();
         NotAdKeys ??= new List<string>();
         TrimToCap(InstrumentalKeys, 500);

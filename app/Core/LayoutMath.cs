@@ -36,4 +36,19 @@ public static class LayoutMath
     /// <summary>水平居中时文本左边缘 x（容器宽、文本实测宽）。</summary>
     public static double CenteredTextX(double containerWidth, double textWidth) =>
         CenterOffset(containerWidth, textWidth);
+
+    /// <summary>
+    /// 译文字号（v0.7 改比例跟随，取代 v0.6 的「原文 −6」固定差）：
+    /// 译文字号 = round（原文字号 × 0.62)，下限 11、上限不超过原文 −4；
+    /// 原文很小时（原文 −4 &lt; 11）上下限冲突，以下限让位、保底 8（字号区间 12~60 内只在 12~14 触发）。
+    /// 主流桌面歌词软件（BetterLyrics/桌面 QQ 音乐等）译文都是按原文比例缩小，不用固定差——
+    /// 固定差在大字号时译文显得过大、小字号时又过小。
+    /// </summary>
+    public static double TranslationFontSize(double originalSize)
+    {
+        double v = Math.Round(originalSize * 0.62);
+        double hi = Math.Max(8, originalSize - 4);
+        double lo = Math.Min(11, hi);
+        return Math.Clamp(v, lo, hi);
+    }
 }

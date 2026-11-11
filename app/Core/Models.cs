@@ -112,3 +112,23 @@ public static class Simplifier
         return new string(chars);
     }
 }
+
+/// <summary>
+/// 显示层繁→简转换（v0.7，「繁体转简体」开关开时用）：把一份歌词复制成显示副本，
+/// **原文行与自带译文行**都按字 1:1 映射成简体。映射是 char→char，行长与逐字时间数组
+/// （CharTimesMs，同一数组引用复用）都不受影响，扫光节奏不变。
+/// 只转显示副本——缓存文件、搜索匹配用的原始歌词永不被改（关掉开关即可原样显示繁体）。
+/// </summary>
+public static class LyricsDisplay
+{
+    public static Lyrics ConvertForDisplay(Lyrics raw)
+    {
+        var lines = new List<LyricLine>(raw.Lines.Count);
+        foreach (var l in raw.Lines)
+            lines.Add(new LyricLine(l.TimeMs, Simplifier.ToSimplified(l.Text), l.CharTimesMs));
+        var trans = new List<string>(raw.Translations.Count);
+        foreach (string t in raw.Translations)
+            trans.Add(Simplifier.ToSimplified(t));
+        return new Lyrics(lines, raw.Title, raw.Artist, trans);
+    }
+}

@@ -294,6 +294,43 @@ AppLog.Write($"[译文] 「{track.Title}」 已后台补取网易云 tlyric 并�
 return new Core.Lyrics(current.Lines, current.Title, current.Artist, aligned);
 }
 
+/// <summary>
+/// v0.7 机器翻译兜底：网易云补译也没有时，把原文逐行机翻成简体中文（MachineTranslate），
+/// 按行序贴回（机翻无时间戳，用原文行的序位对齐）。成功则写 .trans.lrc 缓存——
+/// 缓存首行带 [by:机器翻译] 标记行标明来源（解析器会跳过无时间标签行，不影响下次读取），
+/// 日志同样标 machine。不需要/失败返回 null，调用方保持原歌词不动。
+/// </summary>
+public async Task<Core.Lyrics?> MachineTranslateAsync(TrackInfo track, Core.Lyrics current,
+CancellationToken ct)
+{
+if (!MachineTranslate.NeedsTranslation(current)) return null;
+var lines = current.Lines.Select(l => l.Text).ToList();
+List<string>? translated;
+try { translated = await MachineTranslate.TranslateLinesAsync(lines, ct).ConfigureAwait(false); }
+catch (OperationCanceledException) { throw; }
+catch { return null; }
+if (translated == null) return null;
+if (!translated.Any(t => !string.IsNullOrWhiteSpace(t))) return null;
+// 保险丝：机翻结果若与原文逐行几乎全同（接口把原文原样返回），当作没翻到
+int same = 0;
+for (int i = 0; i < lines.Count; i++)
+    if (translated[i] == lines[i] && lines[i].Length > 0) same++;
+if (lines.Count > 0 && same >= Math.Max(1, lines.Count * 9 / 10)) return null;
+
+var sb = new System.Text.StringBuilder();
+sb.AppendLine("[by:机器翻译 MachineTranslate]");
+for (int i = 0; i < current.Lines.Count; i++)
+{
+    if (string.IsNullOrWhiteSpace(translated[i])) continue;
+    long t = current.Lines[i].TimeMs;
+    sb.AppendLine($"[{t / 60000:D2}:{t / 1000 % 60:D2}.{t % 1000 / 10:D2}]{translated[i]}");
+}
+WriteCacheTrans(track.Key, sb.ToString());
+AppLog.Write($"[译文] 「{track.Title}」 无自带译文，已机器翻译兜底（来源 machine，" +
+    $"{translated.Count(t => !string.IsNullOrWhiteSpace(t))}/{current.Lines.Count} 行）");
+return new Core.Lyrics(current.Lines, current.Title, current.Artist, translated);
+}
+
 private FetchOutcome? TryReadCache(string key, TrackInfo track)
 {
 try

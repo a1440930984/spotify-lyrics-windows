@@ -69,7 +69,8 @@ public sealed class ManualLyricsWindow : FluentWindow
         MinHeight = 380;
         ResizeMode = ResizeMode.CanResizeWithGrip;
         ExtendsContentIntoTitleBar = true;
-        WindowBackdropType = WindowBackdropType.Mica;
+        // v0.7：与设置窗同一规则（纯黑/深蓝关 Mica 让主题色真正生效，其余保留 Mica）
+        WindowBackdropType = Theme.Backdrop;
 
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });

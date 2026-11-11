@@ -43,7 +43,7 @@ public static class Theme
         {
             ["spotify-dark"] = new ThemePalette
             {
-                Id = "spotify-dark", DisplayName = "Spotify 深色（默认）",
+                Id = "spotify-dark", DisplayName = "Spotify 深色",
                 Bg = Color.FromRgb(0x12, 0x12, 0x12), Panel = Color.FromRgb(0x1E, 0x1E, 0x1E),
                 Border = Color.FromRgb(0x2A, 0x2A, 0x2A), Text = Colors.White,
                 SubText = Color.FromRgb(0xB3, 0xB3, 0xB3), Accent = Color.FromRgb(0x1E, 0xD7, 0x60),
@@ -63,17 +63,20 @@ public static class Theme
             },
             ["deep-blue"] = new ThemePalette
             {
+                // v0.7：蓝色再往深邃藏青推（背景 #0A1128、卡片 #14213D 系），
+                // 与纯黑的 #000/#0A0A0A 拉开肉眼可辨的差距（v0.6 两套被 Mica 罩住看着一样，
+                // 且旧蓝值本身偏灰——双侧都修，见 Program.ApplyFluentTheme 的覆写键补全）。
                 Id = "deep-blue", DisplayName = "深蓝",
-                Bg = Color.FromRgb(0x0B, 0x12, 0x20), Panel = Color.FromRgb(0x13, 0x1C, 0x2E),
-                Border = Color.FromRgb(0x22, 0x31, 0x4D), Text = Colors.White,
-                SubText = Color.FromRgb(0x9F, 0xB3, 0xCC), Accent = Color.FromRgb(0x1E, 0xD7, 0x60),
-                Hover = Color.FromRgb(0x1B, 0x29, 0x42), Pressed = Color.FromRgb(0x24, 0x36, 0x5A),
-                SelectedRow = Color.FromRgb(0x16, 0x38, 0x2C), TitleBar = Color.FromRgb(0x0E, 0x16, 0x26),
+                Bg = Color.FromRgb(0x0A, 0x11, 0x28), Panel = Color.FromRgb(0x14, 0x21, 0x3D),
+                Border = Color.FromRgb(0x2A, 0x3F, 0x66), Text = Colors.White,
+                SubText = Color.FromRgb(0xA3, 0xB8, 0xD8), Accent = Color.FromRgb(0x1E, 0xD7, 0x60),
+                Hover = Color.FromRgb(0x1B, 0x2A, 0x4A), Pressed = Color.FromRgb(0x24, 0x36, 0x5E),
+                SelectedRow = Color.FromRgb(0x1A, 0x2F, 0x52), TitleBar = Color.FromRgb(0x0D, 0x15, 0x26),
                 IsLight = false
             },
             ["light"] = new ThemePalette
             {
-                Id = "light", DisplayName = "浅色",
+                Id = "light", DisplayName = "浅色（默认）",
                 Bg = Color.FromRgb(0xF4, 0xF4, 0xF6), Panel = Color.FromRgb(0xFF, 0xFF, 0xFF),
                 Border = Color.FromRgb(0xDC, 0xDC, 0xE2), Text = Color.FromRgb(0x17, 0x17, 0x1C),
                 SubText = Color.FromRgb(0x5C, 0x5C, 0x66), Accent = Color.FromRgb(0x17, 0xA7, 0x4B),
@@ -83,7 +86,19 @@ public static class Theme
             },
         };
 
-    public const string DefaultPaletteId = "spotify-dark";
+    /// <summary>v0.7：默认主题改浅色（新装默认；老用户读自己存的设置）。</summary>
+    public const string DefaultPaletteId = "light";
+
+    /// <summary>
+    /// FluentWindow 的背景材质（v0.7）：纯黑/深蓝两套**关掉 Mica**——Mica 是系统材质、
+    /// 不吃应用资源覆写，v0.6 时两套主题的背景覆写全被它罩住、看着一模一样（用户实测）。
+    /// 关掉后窗口背景走 ApplicationBackgroundBrush 覆写（调色板色），两套立分。
+    /// 其余两套（Spotify 深色/浅色）保留 Mica 质感。
+    /// </summary>
+    public static Wpf.Ui.Controls.WindowBackdropType Backdrop =>
+        Current.Id is "pure-black" or "deep-blue"
+            ? Wpf.Ui.Controls.WindowBackdropType.None
+            : Wpf.Ui.Controls.WindowBackdropType.Mica;
 
     private static ThemePalette _current = Palettes[DefaultPaletteId];
     private static readonly Dictionary<string, SolidColorBrush> _brushCache = new();
@@ -255,6 +270,30 @@ public static class Theme
         s.Setters.Add(new Setter(Control.BorderBrushProperty, AccentBrush));
         s.Setters.Add(new Setter(Control.FontWeightProperty, FontWeights.Bold));
         return s;
+    }
+
+    /// <summary>
+    /// 预设色块的扁平模板（v0.7）：原生 Button 默认模板带悬停背景与内边距，
+    /// 鼠标悬停时色块四周会透出底色、颜色铺不满（颜色盘窗与设置窗颜色卡两处同病）。
+    /// 换成纯 Border 模板：背景=色块自己的颜色、铺满整个方块、无内边距；
+    /// 悬停反馈只给一圈强调色描边（边框加粗），不再有底色透出。
+    /// </summary>
+    public static ControlTemplate FlatSwatchTemplate()
+    {
+        var border = new FrameworkElementFactory(typeof(Border), "Bd");
+        border.SetValue(Border.BackgroundProperty,
+            new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.BorderBrushProperty,
+            new TemplateBindingExtension(Control.BorderBrushProperty));
+        border.SetValue(Border.BorderThicknessProperty,
+            new TemplateBindingExtension(Control.BorderThicknessProperty));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
+        var tpl = new ControlTemplate(typeof(Button)) { VisualTree = border };
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BorderBrushProperty, AccentBrush, "Bd"));
+        hover.Setters.Add(new Setter(Border.BorderThicknessProperty, new Thickness(2), "Bd"));
+        tpl.Triggers.Add(hover);
+        return tpl;
     }
 
     /// <summary>自绘标题栏窗口按钮（最小化/关闭）：透明底、悬停变色。</summary>

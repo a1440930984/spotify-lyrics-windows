@@ -165,6 +165,11 @@ public sealed class ColorPickerWindow : ThemedWindow
                 Width = 38, Height = 30, Margin = new Thickness(0, 0, 6, 6),
                 Background = new SolidColorBrush(c),
                 BorderBrush = Theme.BorderBrush,
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(0),
+                // v0.7：扁平模板——原生 Button 模板悬停时色块四周透出底色、颜色铺不满，
+                // 换纯 Border 模板（颜色铺满、悬停只给一圈强调色描边）
+                Template = Theme.FlatSwatchTemplate(),
                 Tag = c
             };
             btn.Click += (_, _) => SetColor((Color)btn.Tag, fromHex: false);
