@@ -1,4 +1,5 @@
 name: Release
+run-name: SpotifyLyricsWin ${{ github.ref_name }} 构建发布
 
 # 打 tag（v*）即发版：云端编译主程序 + 更新助手 → 组装 zip → 建 Release 并上传
 # → 往 release-receipts 分支写回执（免批准核查发版结果，照 NOVA 的做法）。
