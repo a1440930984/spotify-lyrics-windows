@@ -34,10 +34,21 @@ public sealed class FloatingWindow : Window
     private readonly RowDefinition _bandRow;
 
     private const double BandHeight = 34;
+    /// <summary>按钮带最小宽度：两钮 36+2+36 + 胶囊内边距 5×2 + 描边 ≈ 86，取 92 留余量。
+    /// 窗口宽度取「歌词行宽」与它的较大者（v0.6），按钮带又恒居中，锁钮永远在窗口中轴线上。</summary>
+    private const double BandMinWidth = 92;
     private Border _bandCapsule = null!;
+    private MenuItem _notAdMenuItem = null!;
+    private MenuItem _instrumentalMenuItem = null!;
     private bool _bandShown;
     private double _lastHeight = -1;
-    private bool _suppressCenterKeep;
+    // v0.6 按钮带动画（约 180ms，代码驱动）：_bandApplied 是已应用的带高（0~BandHeight），
+    // 动画期间 SizeChanged 跳过「保持垂直中心」逻辑（Top 由动画自己逐帧补偿）。
+    private bool _animatingBand;
+    private double _bandApplied;
+    private double _bandAnimFrom, _bandAnimTo;
+    private long _bandAnimStartTick;
+    private DispatcherTimer? _bandAnimTimer;
 
     private string _lastCurrent = "\0";
     private bool _dimmed;
@@ -53,6 +64,15 @@ public sealed class FloatingWindow : Window
     public event Action? ManualPickRequested;
     /// <summary>右击菜单：重新搜词（v0.2）</summary>
     public event Action? RefetchRequested;
+    /// <summary>右击菜单「这不是广告」（v0.6，仅广告提示状态下可用）</summary>
+    public event Action? NotAdRequested;
+    /// <summary>右击菜单「标记为纯音乐 / 取消标记」（v0.6）</summary>
+    public event Action? ToggleInstrumentalRequested;
+
+    /// <summary>当前是否正显示广告提示（Program 维护；决定右击菜单「这不是广告」是否可用）。</summary>
+    public bool IsAdShowing { get; set; }
+    /// <summary>当前曲目是否已被标记为纯音乐（Program 维护；决定菜单项文案）。</summary>
+    public bool IsInstrumental { get; set; }
 
     public FloatingWindow(Settings settings)
     {
@@ -124,7 +144,11 @@ public sealed class FloatingWindow : Window
             Margin = new Thickness(0, 0, 2, 0),
             ToolTip = "锁定/解锁位置",
             Effect = buttonShadow,
-            FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI")
+            FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
+            // v0.6：幽灵按钮——自绘模板 + 无焦点框，杜绝默认模板的选中/聚焦系统底色
+            Template = GhostButtonTemplate(),
+            FocusVisualStyle = null,
+            Focusable = false
         };
         _lockButton.Click += (_, _) => ToggleLock();
         _closeButton = new Button
@@ -139,7 +163,10 @@ public sealed class FloatingWindow : Window
             FontSize = 14,
             Cursor = Cursors.Hand,
             Effect = buttonShadow,
-            ToolTip = "隐藏歌词"
+            ToolTip = "隐藏歌词",
+            Template = GhostButtonTemplate(),
+            FocusVisualStyle = null,
+            Focusable = false
         };
         _closeButton.Click += (_, _) => CloseRequested?.Invoke();
 
@@ -154,7 +181,9 @@ public sealed class FloatingWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(16),
             Padding = new Thickness(5, 2, 5, 2),
-            HorizontalAlignment = HorizontalAlignment.Right,
+            // v0.6：按钮带改水平居中——窗口宽度 = max(歌词行宽, 按钮带宽)（见 AdaptWidth），
+            // 歌词行本身也居中，两者同在窗口中轴线上，长短句切换时锁钮位置纹丝不动。
+            HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Visibility = Visibility.Collapsed,
             Child = buttons
@@ -187,6 +216,10 @@ public sealed class FloatingWindow : Window
         miPick.Click += (_, _) => ManualPickRequested?.Invoke();
         var miRefetch = new MenuItem { Header = "重新搜词", Style = Theme.MenuItemStyle() };
         miRefetch.Click += (_, _) => RefetchRequested?.Invoke();
+        _notAdMenuItem = new MenuItem { Header = "这不是广告", Style = Theme.MenuItemStyle() };
+        _notAdMenuItem.Click += (_, _) => NotAdRequested?.Invoke();
+        _instrumentalMenuItem = new MenuItem { Header = "标记为纯音乐", Style = Theme.MenuItemStyle() };
+        _instrumentalMenuItem.Click += (_, _) => ToggleInstrumentalRequested?.Invoke();
         _lockMenuItem = new MenuItem { Header = "锁定位置", IsCheckable = true, Style = Theme.MenuItemStyle() };
         _lockMenuItem.Click += (_, _) =>
         {
@@ -199,10 +232,18 @@ public sealed class FloatingWindow : Window
         menu.Items.Add(miSettings);
         menu.Items.Add(miPick);
         menu.Items.Add(miRefetch);
+        menu.Items.Add(_notAdMenuItem);
+        menu.Items.Add(_instrumentalMenuItem);
         menu.Items.Add(_lockMenuItem);
         menu.Items.Add(new Separator());
         menu.Items.Add(miHide);
-        menu.Opened += (_, _) => _lockMenuItem.IsChecked = _settings.PositionLocked;
+        menu.Opened += (_, _) =>
+        {
+            _lockMenuItem.IsChecked = _settings.PositionLocked;
+            // 「这不是广告」只在正显示广告提示时可点；纯音乐菜单项按当前标记状态换文案
+            _notAdMenuItem.IsEnabled = IsAdShowing;
+            _instrumentalMenuItem.Header = IsInstrumental ? "取消纯音乐标记" : "标记为纯音乐";
+        };
         ContextMenu = menu;
 
         _hideButtonsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
@@ -213,12 +254,11 @@ public sealed class FloatingWindow : Window
         };
 
         // 内容高度变化（单/双行切换、字号变化）时保持窗口垂直中心不动，
-        // 用户感知的歌词位置不跳。按钮带的上扩/收回自己做全量 Top 补偿，走 _suppressCenterKeep 豁免。
+        // 用户感知的歌词位置不跳。按钮带动画期间高度由动画逐帧驱动并自行补偿 Top，这里豁免。
         SizeChanged += (_, e) =>
         {
-            if (_suppressCenterKeep)
+            if (_animatingBand)
             {
-                _suppressCenterKeep = false;
                 _lastHeight = e.NewSize.Height;
                 return;
             }
@@ -261,12 +301,42 @@ public sealed class FloatingWindow : Window
 
     private void UpdateLockButton()
     {
-        // 🔒 = 已锁定（不可拖）；🔓 = 未锁定。v0.5：锁定态用绿色半透明底衬提示状态
-        // （胶囊带里不再用描边，避免与胶囊自身的描边混淆）。
+        // 🔒 = 已锁定（不可拖）；🔓 = 未锁定。v0.6：锁定态改用绿色图标本身表达状态，
+        // 不再刷整块底色（用户反馈底色出戏）；背景恒透明，悬停高亮由幽灵模板负责。
         _lockButton.Content = _settings.PositionLocked ? "🔒" : "🔓";
-        _lockButton.Background = _settings.PositionLocked
-            ? new SolidColorBrush(Color.FromArgb(0x40, 0x1E, 0xD7, 0x60))
-            : Brushes.Transparent;
+        _lockButton.Foreground = _settings.PositionLocked ? Theme.AccentBrush : Brushes.White;
+        _lockButton.Background = Brushes.Transparent;
+    }
+
+    /// <summary>
+    /// v0.6 幽灵按钮模板（纯代码构建）：默认 Button 模板在聚焦/按下/悬停时会画系统
+    /// 描边与底色，在半透明悬浮窗上很出戏（用户实测反馈）。换成全自绘模板：
+    /// 透明底、圆角 6、无焦点框；悬停/按下只在按钮自身范围叠一层白色微光（14%/22%）。
+    /// </summary>
+    private static ControlTemplate GhostButtonTemplate()
+    {
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.BackgroundProperty,
+            new TemplateBindingExtension(Button.BackgroundProperty));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
+        var hover = new Trigger
+        {
+            Property = UIElement.IsMouseOverProperty,
+            Value = true
+        };
+        hover.Setters.Add(new Setter(Button.BackgroundProperty,
+            new SolidColorBrush(Color.FromArgb(0x24, 0xFF, 0xFF, 0xFF))));
+        template.Triggers.Add(hover);
+        var pressed = new Trigger { Property = Button.IsPressedProperty, Value = true };
+        pressed.Setters.Add(new Setter(Button.BackgroundProperty,
+            new SolidColorBrush(Color.FromArgb(0x38, 0xFF, 0xFF, 0xFF))));
+        template.Triggers.Add(pressed);
+        return template;
     }
 
     private void RevealButtons()
@@ -277,23 +347,58 @@ public sealed class FloatingWindow : Window
     }
 
     /// <summary>
-    /// 按钮带显/隐（v0.3）：扩高 BandHeight 的同时 Top 反向移动同等距离，
-    /// 歌词区在屏幕上的位置像素级不动，按钮永远不会盖住歌词；
-    /// 收回时反向操作。拖动判定不含按钮本身（见 IsOnButton），带内空白区仍可拖。
+    /// 按钮带显/隐。v0.3 起按钮带扩高时 Top 反向补偿，歌词区屏幕位置像素不动；
+    /// v0.6 改为约 180ms 代码动画（DispatcherTimer 逐帧，EaseOut 三次方）：
+    /// 带高 0↔BandHeight 平滑增减、Top 按已应用增量逐帧补偿、胶囊同步淡入淡出，
+    /// 不再一帧跳变。动画中途反向调用时从当前已应用高度接着走，不回跳。
+    /// 拖动判定不含按钮本身（见 IsOnButton），带内空白区仍可拖。
     /// </summary>
     private void SetBand(bool show)
     {
-        if (_bandShown == show) return;
+        if (_bandShown == show && !_animatingBand) return;
         _bandShown = show;
-        double delta = show ? BandHeight : -BandHeight;
-        _suppressCenterKeep = true;
-        _bandRow.Height = new GridLength(show ? BandHeight : 0);
-        var vis = show ? Visibility.Visible : Visibility.Collapsed;
-        _bandCapsule.Visibility = vis;
-        _closeButton.Visibility = vis;
-        _lockButton.Visibility = vis;
-        if (!double.IsNaN(Top) && IsLoaded) Top -= delta;
-        else _suppressCenterKeep = false;
+        if (show)
+        {
+            _bandCapsule.Visibility = Visibility.Visible;
+            _closeButton.Visibility = Visibility.Visible;
+            _lockButton.Visibility = Visibility.Visible;
+        }
+        _bandAnimFrom = _bandApplied;
+        _bandAnimTo = show ? BandHeight : 0;
+        _bandAnimStartTick = Environment.TickCount64;
+        _animatingBand = true;
+        if (_bandAnimTimer == null)
+        {
+            _bandAnimTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+            _bandAnimTimer.Tick += OnBandAnimTick;
+        }
+        _bandAnimTimer.Stop();
+        _bandAnimTimer.Start();
+    }
+
+    private void OnBandAnimTick(object? sender, EventArgs e)
+    {
+        const double DurationMs = 180;
+        double p = Math.Clamp((Environment.TickCount64 - _bandAnimStartTick) / DurationMs, 0, 1);
+        double eased = 1 - Math.Pow(1 - p, 3); // EaseOutCubic
+        double h = _bandAnimFrom + (_bandAnimTo - _bandAnimFrom) * eased;
+        double step = h - _bandApplied;
+        _bandApplied = h;
+        _bandRow.Height = new GridLength(Math.Max(0, h));
+        _bandCapsule.Opacity = BandHeight > 0 ? h / BandHeight : 0;
+        // 带在歌词上方扩/收：Top 反向补偿已应用增量，歌词区屏幕位置不动
+        if (step != 0 && !double.IsNaN(Top) && IsLoaded) Top -= step;
+        if (p >= 1)
+        {
+            _bandAnimTimer?.Stop();
+            _animatingBand = false;
+            if (_bandAnimTo <= 0)
+            {
+                _bandCapsule.Visibility = Visibility.Collapsed;
+                _closeButton.Visibility = Visibility.Collapsed;
+                _lockButton.Visibility = Visibility.Collapsed;
+            }
+        }
     }
 
     // ---------- 样式 ----------
@@ -363,6 +468,9 @@ public sealed class FloatingWindow : Window
             needed = Math.Max(needed, MeasurePlain(_nextBlock.Text, Math.Max(10, _settings.FontSize - 4)));
         if (_translationBlock.Visibility == Visibility.Visible)
             needed = Math.Max(needed, MeasurePlain(_translationBlock.Text, Math.Max(9, _settings.FontSize - 6)));
+        // v0.6：窗口宽度不小于按钮带宽——按钮带居中、歌词居中，长短句共用同一中轴，
+        // 锁钮位置与歌词长度彻底脱钩（用户验收点）。
+        needed = Math.Max(needed, BandMinWidth);
         needed += 12 + 2; // 根内边距 6×2 + 余量
         var wa = SystemParameters.WorkArea;
         double w = Math.Clamp(needed, 200, Math.Max(200, wa.Width));

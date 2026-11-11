@@ -60,6 +60,14 @@ public static class HttpHelp
 {
 public static readonly HttpClient Client = Create();
 
+/// <summary>
+/// v0.6：网络层失败计数（仅统计请求异常——超时/连不上/DNS 等；HTTP 非 2xx 是
+/// 「服务器有响应」，不计）。LyricsService 在一次取词前后取快照差值，
+/// 用来把失败分类成「网络型（可退避重试）」与「没收录型（收手）」。
+/// </summary>
+private static int _networkFailures;
+public static int NetworkFailureCount => Volatile.Read(ref _networkFailures);
+
 private static HttpClient Create()
 {
 var c = new HttpClient(new HttpClientHandler
@@ -84,6 +92,16 @@ if (userAgent!= null) req.Headers.UserAgent.ParseAdd(userAgent);
 using var resp = await Client.SendAsync(req, cts.Token).ConfigureAwait(false);
 if (!resp.IsSuccessStatusCode) return null;
 return await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+}
+catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+{
+Interlocked.Increment(ref _networkFailures); // 本地超时也算网络型失败（源太慢/网络抖）
+return null;
+}
+catch (Exception) when (!ct.IsCancellationRequested)
+{
+Interlocked.Increment(ref _networkFailures);
+return null;
 }
 catch { return null;}
 }
@@ -281,7 +299,7 @@ var combos = LyricsService.BuildCombos(title, artist);
 // 路线 B：lyrics.kugou.com/search 直接给 id/accesskey 候选
 foreach (string kw in combos.Take(2))
 {
-if (result.Candidates.Count >= 10) break;
+if (result.Candidates.Count >= 20) break;
 string? json = await HttpHelp.GetStringAsync(
 $"https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword={HttpHelp.Enc(kw)}", ct);
 var root = HttpHelp.ParseJson(json);
@@ -309,7 +327,7 @@ foreach (string kw in combos.Take(2))
 {
 if (addedFromA >= 3) break;
 string? json = await HttpHelp.GetStringAsync(
-$"http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword={HttpHelp.Enc(kw)}&page=1&pagesize=8", ct);
+$"http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword={HttpHelp.Enc(kw)}&page=1&pagesize=20", ct);
 var root = HttpHelp.ParseJson(json);
 if (root is not JsonElement r) continue;
 anyResponse = true;
@@ -435,9 +453,9 @@ var seen = new HashSet<string>();
 bool anyResponse = false;
 foreach (string kw in LyricsService.BuildCombos(title, artist).Take(2))
 {
-if (result.Candidates.Count >= 10) break;
+if (result.Candidates.Count >= 20) break;
 string? json = await HttpHelp.GetStringAsync(
-$"https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=10&w={HttpHelp.Enc(kw)}&format=json",
+$"https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=20&w={HttpHelp.Enc(kw)}&format=json",
 ct, referer: "https://y.qq.com/");
 var root = HttpHelp.ParseJson(json);
 if (root is not JsonElement r) continue;
@@ -524,6 +542,41 @@ TransLrcText = tlyric.Contains('[')? tlyric: null
 };
 }
 
+/// <summary>
+/// v0.6 后台补译专用：只取 tlyric（主源命中酷狗等无译文字段的源时补这一级）。
+/// 按标题/歌手/时长在 cloudsearch 里核到同一首歌，再取它的 tlyric 返回。
+/// </summary>
+public async Task<string?> FetchTranslationOnlyAsync(string title, string artist, long durationMs,
+CancellationToken ct)
+{
+foreach (string kw in LyricsService.BuildCombos(title, artist).Take(2))
+{
+string? json = await HttpHelp.GetStringAsync(
+$"https://interface.music.163.com/api/cloudsearch/pc?type=1&s={HttpHelp.Enc(kw)}&limit=10",
+ct, referer: "https://music.163.com/");
+var root = HttpHelp.ParseJson(json);
+if (root is not JsonElement r) continue;
+if (!r.TryGetProperty("result", out var result) ||!result.TryGetProperty("songs", out var songs) ||
+songs.ValueKind!= JsonValueKind.Array) continue;
+foreach (var s in songs.EnumerateArray())
+{
+string name = HttpHelp.Str(s, "name");
+long id = HttpHelp.Num(s, "id");
+long dt = HttpHelp.Num(s, "dt");
+string singers = "";
+if (s.TryGetProperty("ar", out var ar) && ar.ValueKind == JsonValueKind.Array)
+singers = string.Join(",", ar.EnumerateArray().Select(a => HttpHelp.Str(a, "name")));
+if (id == 0) continue;
+if (!HttpHelp.TitleMatches(name, title) ||!HttpHelp.ArtistMatches(singers, artist)) continue;
+if (!HttpHelp.DurationClose(dt, durationMs)) continue;
+var hit = await FetchLyricByIdAsync(id, ct);
+if (hit?.TransLrcText is { Length: > 0 } t) return t;
+return null; // 已核到同一首歌，它没有 tlyric 就不用再试别的候选
+}
+}
+return null;
+}
+
 // ---------- 手动选词（v0.2） ----------
 
 public async Task<CandidateSearchResult> SearchCandidatesAsync(string title, string artist,
@@ -534,9 +587,9 @@ var seen = new HashSet<long>();
 bool anyResponse = false;
 foreach (string kw in LyricsService.BuildCombos(title, artist).Take(2))
 {
-if (result.Candidates.Count >= 10) break;
+if (result.Candidates.Count >= 20) break;
 string? json = await HttpHelp.GetStringAsync(
-$"https://interface.music.163.com/api/cloudsearch/pc?type=1&s={HttpHelp.Enc(kw)}&limit=10",
+$"https://interface.music.163.com/api/cloudsearch/pc?type=1&s={HttpHelp.Enc(kw)}&limit=20",
 ct, referer: "https://music.163.com/");
 var root = HttpHelp.ParseJson(json);
 if (root is not JsonElement r) continue;
@@ -654,9 +707,9 @@ var seen = new HashSet<string>();
 bool anyResponse = false;
 foreach (string kw in LyricsService.BuildCombos(title, artist).Take(2))
 {
-if (result.Candidates.Count >= 10) break;
+if (result.Candidates.Count >= 20) break;
 string? raw = await HttpHelp.GetStringAsync(
-$"http://search.kuwo.cn/r.s?all={HttpHelp.Enc(kw)}&ft=music&itemset=web_2013&client=kt&pn=0&rn=10&rformat=json&encoding=utf8", ct);
+$"http://search.kuwo.cn/r.s?all={HttpHelp.Enc(kw)}&ft=music&itemset=web_2013&client=kt&pn=0&rn=20&rformat=json&encoding=utf8", ct);
 if (raw == null) continue;
 anyResponse = true;
 var root = HttpHelp.ParseJson(raw.Replace('\'', '"'));

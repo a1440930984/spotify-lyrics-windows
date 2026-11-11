@@ -31,6 +31,44 @@ public static class AppLog
         catch { /* 日志写失败不影响主流程 */ }
     }
 
+    // ---------- v0.6：异常落盘 + 限频写 ----------
+
+    private static readonly Dictionary<string, long> LastWriteByKey = new();
+
+    /// <summary>
+    /// 把异常完整落盘（类型 + 消息 + 堆栈）。全局未处理异常捕获（Program 三路）
+    /// 与各关键路径的 catch 都走这里——v0.5 时手动选词崩溃退出、日志里一个字没有，
+    /// 就是因为没有这条兜底。抽成独立方法便于无头测试断言落盘内容。
+    /// </summary>
+    public static void LogException(string where, Exception? ex)
+    {
+        if (ex == null) { Write($"[异常] {where}：（无异常对象）"); return; }
+        Write($"[异常] {where}：{ex.GetType().FullName}: {ex.Message}");
+        string? stack = ex.StackTrace;
+        if (!string.IsNullOrWhiteSpace(stack))
+        {
+            foreach (string line in stack.Replace("\r\n", "\n").Split('\n'))
+                if (line.Trim().Length > 0) Write($"    {line.Trim()}");
+        }
+        if (ex.InnerException != null)
+            Write($"    内部异常：{ex.InnerException.GetType().FullName}: {ex.InnerException.Message}");
+    }
+
+    /// <summary>
+    /// 限频版 Write：同一 key 在 minIntervalMs 内只写一次（同类重复行防刷屏，
+    /// 如轮询里的重复状态、重试里的同因失败）。
+    /// </summary>
+    public static void WriteLimited(string key, string message, int minIntervalMs = 10_000)
+    {
+        lock (Lock)
+        {
+            long now = Environment.TickCount64;
+            if (LastWriteByKey.TryGetValue(key, out long last) && now - last < minIntervalMs) return;
+            LastWriteByKey[key] = now;
+        }
+        Write(message);
+    }
+
     /// <summary>确保日志文件存在（程序启动时调用，哪怕还没写过任何一行）。</summary>
     public static void EnsureFile()
     {

@@ -9,6 +9,8 @@ namespace SpotifyLyricsWin.Ui;
 public sealed class Tray : IDisposable
 {
     private readonly NotifyIcon _icon;
+    private readonly ToolStripMenuItem _notAdItem;
+    private readonly ToolStripMenuItem _instrumentalItem;
 
     public event Action? ToggleFloating;
     public event Action? OpenSettings;
@@ -18,13 +20,17 @@ public sealed class Tray : IDisposable
     public event Action? ExitApp;
     /// <summary>v0.4：托盘气泡被点击（用于「发现新版」气泡 → 打开设置）。</summary>
     public event Action? BalloonClicked;
+    /// <summary>v0.6：广告误判纠偏（与悬浮窗右击菜单同一入口）。</summary>
+    public event Action? NotAd;
+    /// <summary>v0.6：标记/取消标记当前曲目为纯音乐。</summary>
+    public event Action? ToggleInstrumental;
 
     public Tray()
     {
         _icon = new NotifyIcon
         {
             Icon = LoadIcon(),
-            Text = "SpotifyLyrics 悬浮歌词 v0.4",
+            Text = "SpotifyLyrics 悬浮歌词",
             Visible = true
         };
         _icon.BalloonTipClicked += (_, _) => BalloonClicked?.Invoke();
@@ -33,12 +39,25 @@ public sealed class Tray : IDisposable
         menu.Items.Add("设置…", null, (_, _) => OpenSettings?.Invoke());
         menu.Items.Add("手动选词…", null, (_, _) => ManualPick?.Invoke());
         menu.Items.Add("重新搜词", null, (_, _) => RefetchLyrics?.Invoke());
+        _notAdItem = new ToolStripMenuItem("这不是广告") { Enabled = false };
+        _notAdItem.Click += (_, _) => NotAd?.Invoke();
+        menu.Items.Add(_notAdItem);
+        _instrumentalItem = new ToolStripMenuItem("标记为纯音乐");
+        _instrumentalItem.Click += (_, _) => ToggleInstrumental?.Invoke();
+        menu.Items.Add(_instrumentalItem);
         menu.Items.Add("打开日志", null, (_, _) => OpenLog?.Invoke());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => ExitApp?.Invoke());
         _icon.ContextMenuStrip = menu;
         _icon.DoubleClick += (_, _) => OpenSettings?.Invoke();
     }
+
+    /// <summary>v0.6：广告提示状态变化时同步托盘「这不是广告」可用性（Program 维护）。</summary>
+    public void SetAdState(bool isAd) => _notAdItem.Enabled = isAd;
+
+    /// <summary>v0.6：当前曲目纯音乐标记状态变化时同步托盘菜单文案。</summary>
+    public void SetInstrumentalState(bool marked) =>
+        _instrumentalItem.Text = marked ? "取消纯音乐标记" : "标记为纯音乐";
 
     /// <summary>v0.2：托盘图标用 app.ico（与 exe/窗口同款）；读不到时回退运行时绘制。</summary>
     private static Icon LoadIcon()

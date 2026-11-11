@@ -27,6 +27,13 @@ public sealed class SmtcTracker
     public TrackInfo? Current => _current;
     public bool HasSession => _session != null;
 
+    /// <summary>
+    /// v0.6 诊断：最近一次样本的 PlaybackInfo.Controls 可用动作摘要
+    /// （能否切歌/快进快退/拖动）。这是 LyricFlow「广告无切歌钮」信号在 SMTC 的对应物——
+    /// 本版只随 SMTC 日志行记录、**不参与任何判定**，为下一轮广告规则调校攒真实数据。
+    /// </summary>
+    public string LastControlsSummary { get; private set; } = "";
+
     /// <summary>轮询一次（约每 500ms 调一次）。每个样本必过 ProgressClock.Observe。</summary>
     public async Task PollAsync()
     {
@@ -53,6 +60,16 @@ public sealed class SmtcTracker
             var playback = picked.GetPlaybackInfo();
             bool isPlaying = playback?.PlaybackStatus ==
                 GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+
+            // v0.6：记录 Controls 可用动作（只记录不判定，见 LastControlsSummary 说明）
+            try
+            {
+                var c = playback?.Controls;
+                LastControlsSummary = c == null ? "Controls=无"
+                    : $"可切歌={c.IsNextEnabled} 可上一首={c.IsPreviousEnabled} " +
+                      $"可快进={c.IsFastForwardEnabled} 可快退={c.IsRewindEnabled} 可拖动={c.IsPlaybackPositionEnabled}";
+            }
+            catch { LastControlsSummary = "Controls=读取失败"; }
 
             long startMs = (long)timeline.StartTime.TotalMilliseconds;
             long endMs = (long)timeline.EndTime.TotalMilliseconds;

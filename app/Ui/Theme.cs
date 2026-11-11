@@ -8,25 +8,106 @@ using System.Windows.Shapes;
 
 namespace SpotifyLyricsWin.Ui;
 
+/// <summary>一套界面主题的调色板（v0.6 多主题）。IsLight 供个别控件决定深浅细节。</summary>
+public sealed class ThemePalette
+{
+    public required string Id { get; init; }
+    public required string DisplayName { get; init; }
+    public required Color Bg { get; init; }
+    public required Color Panel { get; init; }
+    public required Color Border { get; init; }
+    public required Color Text { get; init; }
+    public required Color SubText { get; init; }
+    public required Color Accent { get; init; }
+    public required Color Hover { get; init; }
+    public required Color Pressed { get; init; }
+    public required Color SelectedRow { get; init; }
+    public required Color TitleBar { get; init; }
+    public required bool IsLight { get; init; }
+}
+
 /// <summary>
-/// Spotify 风深色主题（v0.3）：所有页面弃用默认 Windows 样式。
-/// 配色：背景 #121212、面板 #1E1E1E、描边 #2A2A2A、主文字 #FFFFFF、
-/// 次文字 #B3B3B3、强调 #1ED760。
-/// 样式与控件模板全部用代码构建（FrameworkElementFactory），零 XAML。
+/// 界面主题（v0.3 自绘深色起家；v0.6 改为调色板驱动的多主题）：
+/// 4 套预设——Spotify 深色（默认）/ 纯黑 OLED / 深蓝 / 浅色。
+/// 强调色决策：深色三套恒为 Spotify 绿 #1ED760（品牌色，也与歌词高亮默认色呼应）；
+/// 浅色套改深绿 #17A74B（#1ED760 在白底上对比不足，描边/文字会发飘）。
+/// 悬浮歌词的文字颜色不走这里——那是用户自己的颜色设置，两套互不干扰。
+/// Theme.*Color / *Brush 现在都是「当前调色板」的属性（构建窗口时取值）；
+/// 切换主题时已打开的窗口由 Program 关掉重开来整体换装（位置记忆保证回到原位）。
 /// 用法：窗口构造时 Resources.MergedDictionaries.Add(Theme.BuildResources())。
 /// </summary>
 public static class Theme
 {
-    public static readonly Color BgColor = Color.FromRgb(0x12, 0x12, 0x12);
-    public static readonly Color PanelColor = Color.FromRgb(0x1E, 0x1E, 0x1E);
-    public static readonly Color BorderColor = Color.FromRgb(0x2A, 0x2A, 0x2A);
-    public static readonly Color TextColor = Colors.White;
-    public static readonly Color SubTextColor = Color.FromRgb(0xB3, 0xB3, 0xB3);
-    public static readonly Color AccentColor = Color.FromRgb(0x1E, 0xD7, 0x60);
-    public static readonly Color HoverColor = Color.FromRgb(0x2A, 0x2A, 0x2A);
-    public static readonly Color PressedColor = Color.FromRgb(0x33, 0x33, 0x33);
-    public static readonly Color SelectedRowColor = Color.FromRgb(0x24, 0x3A, 0x2B);
-    public static readonly Color TitleBarColor = Color.FromRgb(0x18, 0x18, 0x18);
+    public static readonly IReadOnlyDictionary<string, ThemePalette> Palettes =
+        new Dictionary<string, ThemePalette>
+        {
+            ["spotify-dark"] = new ThemePalette
+            {
+                Id = "spotify-dark", DisplayName = "Spotify 深色（默认）",
+                Bg = Color.FromRgb(0x12, 0x12, 0x12), Panel = Color.FromRgb(0x1E, 0x1E, 0x1E),
+                Border = Color.FromRgb(0x2A, 0x2A, 0x2A), Text = Colors.White,
+                SubText = Color.FromRgb(0xB3, 0xB3, 0xB3), Accent = Color.FromRgb(0x1E, 0xD7, 0x60),
+                Hover = Color.FromRgb(0x2A, 0x2A, 0x2A), Pressed = Color.FromRgb(0x33, 0x33, 0x33),
+                SelectedRow = Color.FromRgb(0x24, 0x3A, 0x2B), TitleBar = Color.FromRgb(0x18, 0x18, 0x18),
+                IsLight = false
+            },
+            ["pure-black"] = new ThemePalette
+            {
+                Id = "pure-black", DisplayName = "纯黑（OLED）",
+                Bg = Color.FromRgb(0x00, 0x00, 0x00), Panel = Color.FromRgb(0x0A, 0x0A, 0x0A),
+                Border = Color.FromRgb(0x1F, 0x1F, 0x1F), Text = Colors.White,
+                SubText = Color.FromRgb(0xA8, 0xA8, 0xA8), Accent = Color.FromRgb(0x1E, 0xD7, 0x60),
+                Hover = Color.FromRgb(0x1A, 0x1A, 0x1A), Pressed = Color.FromRgb(0x26, 0x26, 0x26),
+                SelectedRow = Color.FromRgb(0x14, 0x2E, 0x1E), TitleBar = Color.FromRgb(0x05, 0x05, 0x05),
+                IsLight = false
+            },
+            ["deep-blue"] = new ThemePalette
+            {
+                Id = "deep-blue", DisplayName = "深蓝",
+                Bg = Color.FromRgb(0x0B, 0x12, 0x20), Panel = Color.FromRgb(0x13, 0x1C, 0x2E),
+                Border = Color.FromRgb(0x22, 0x31, 0x4D), Text = Colors.White,
+                SubText = Color.FromRgb(0x9F, 0xB3, 0xCC), Accent = Color.FromRgb(0x1E, 0xD7, 0x60),
+                Hover = Color.FromRgb(0x1B, 0x29, 0x42), Pressed = Color.FromRgb(0x24, 0x36, 0x5A),
+                SelectedRow = Color.FromRgb(0x16, 0x38, 0x2C), TitleBar = Color.FromRgb(0x0E, 0x16, 0x26),
+                IsLight = false
+            },
+            ["light"] = new ThemePalette
+            {
+                Id = "light", DisplayName = "浅色",
+                Bg = Color.FromRgb(0xF4, 0xF4, 0xF6), Panel = Color.FromRgb(0xFF, 0xFF, 0xFF),
+                Border = Color.FromRgb(0xDC, 0xDC, 0xE2), Text = Color.FromRgb(0x17, 0x17, 0x1C),
+                SubText = Color.FromRgb(0x5C, 0x5C, 0x66), Accent = Color.FromRgb(0x17, 0xA7, 0x4B),
+                Hover = Color.FromRgb(0xE8, 0xE8, 0xEE), Pressed = Color.FromRgb(0xDC, 0xDC, 0xE4),
+                SelectedRow = Color.FromRgb(0xDF, 0xF5, 0xE6), TitleBar = Color.FromRgb(0xEC, 0xEC, 0xF0),
+                IsLight = true
+            },
+        };
+
+    public const string DefaultPaletteId = "spotify-dark";
+
+    private static ThemePalette _current = Palettes[DefaultPaletteId];
+    private static readonly Dictionary<string, SolidColorBrush> _brushCache = new();
+
+    public static ThemePalette Current => _current;
+
+    /// <summary>切换当前调色板（未知 id 回退默认套）。窗口在构造时读取，故切换后需重开窗口才整体换装。</summary>
+    public static void Apply(string? id)
+    {
+        if (id == null || !Palettes.TryGetValue(id, out var p)) p = Palettes[DefaultPaletteId];
+        _current = p;
+        _brushCache.Clear();
+    }
+
+    public static Color BgColor => _current.Bg;
+    public static Color PanelColor => _current.Panel;
+    public static Color BorderColor => _current.Border;
+    public static Color TextColor => _current.Text;
+    public static Color SubTextColor => _current.SubText;
+    public static Color AccentColor => _current.Accent;
+    public static Color HoverColor => _current.Hover;
+    public static Color PressedColor => _current.Pressed;
+    public static Color SelectedRowColor => _current.SelectedRow;
+    public static Color TitleBarColor => _current.TitleBar;
     public static readonly Color CloseHoverColor = Color.FromRgb(0xE8, 0x11, 0x23);
 
     public static SolidColorBrush Brush(Color c)
@@ -36,14 +117,22 @@ public static class Theme
         return b;
     }
 
-    public static readonly SolidColorBrush BgBrush = Brush(BgColor);
-    public static readonly SolidColorBrush PanelBrush = Brush(PanelColor);
-    public static readonly SolidColorBrush BorderBrush = Brush(BorderColor);
-    public static readonly SolidColorBrush TextBrush = Brush(TextColor);
-    public static readonly SolidColorBrush SubTextBrush = Brush(SubTextColor);
-    public static readonly SolidColorBrush AccentBrush = Brush(AccentColor);
-    public static readonly SolidColorBrush HoverBrush = Brush(HoverColor);
-    public static readonly SolidColorBrush PressedBrush = Brush(PressedColor);
+    private static SolidColorBrush Cached(string key, Color c)
+    {
+        if (_brushCache.TryGetValue(key, out var b)) return b;
+        b = Brush(c);
+        _brushCache[key] = b;
+        return b;
+    }
+
+    public static SolidColorBrush BgBrush => Cached("bg", BgColor);
+    public static SolidColorBrush PanelBrush => Cached("panel", PanelColor);
+    public static SolidColorBrush BorderBrush => Cached("border", BorderColor);
+    public static SolidColorBrush TextBrush => Cached("text", TextColor);
+    public static SolidColorBrush SubTextBrush => Cached("subtext", SubTextColor);
+    public static SolidColorBrush AccentBrush => Cached("accent", AccentColor);
+    public static SolidColorBrush HoverBrush => Cached("hover", HoverColor);
+    public static SolidColorBrush PressedBrush => Cached("pressed", PressedColor);
 
     public static readonly FontFamily UiFont = new("Microsoft YaHei UI, Segoe UI");
 

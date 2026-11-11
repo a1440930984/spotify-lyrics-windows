@@ -1,10 +1,13 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Media;
 using System.Windows.Threading;
 using SpotifyLyricsWin.Core;
 using SpotifyLyricsWin.Lyrics;
 using SpotifyLyricsWin.Player;
 using SpotifyLyricsWin.Ui;
+using Wpf.Ui.Appearance;
+using Wpf.Ui.Markup;
 
 namespace SpotifyLyricsWin;
 
@@ -32,6 +35,13 @@ public static class Program
     private static string _adKey = "";
     private static string _lastLogSignature = "\0";
 
+    // v0.6 新增状态：单实例锁、纯音乐、网络失败延迟重试
+    private static Mutex? _singleInstanceMutex;
+    private static bool _isInstrumental;
+    private static string _instrumentalKey = "";
+    private static string _pendingRetryKey = "";
+    private static long _pendingRetryAtTick;
+
     // v0.4 自动更新
     private static Application _app = null!;
     private static ReleaseInfo? _pendingRelease;
@@ -40,13 +50,30 @@ public static class Program
     [STAThread]
     public static void Main()
     {
+        // v0.6 单实例：已有实例在跑时新进程直接退出（只记一行日志，不做 IPC 唤起——
+        // 托盘图标一直都在，用户点托盘即可，不值得为唤起引入管道复杂度）。
+        _singleInstanceMutex = new Mutex(initiallyOwned: true,
+            @"Local\SpotifyLyricsWin-SingleInstance", out bool createdNew);
+        if (!createdNew)
+        {
+            AppLog.EnsureFile();
+            AppLog.Write("[启动] 已有实例在运行，本进程退出（单实例）");
+            return;
+        }
+
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         _app = app;
+
+        // v0.6 全局异常兜底（治本项）：用户反馈「手动搜词后整程序退出、日志里什么都没有」——
+        // 此前没有任何全局捕获，未观察的任务异常/模板应用期异常会直接杀进程且不留痕。
+        // 三路全注册，统一落 AppLog（完整类型+消息+堆栈）；UI 线程异常标记 Handled 尽量保命，
+        // 实在保不住的也先把日志落盘再退。
+        RegisterGlobalExceptionHandlers(app);
 
         // v0.3：启动先落一行日志，保证 log.txt 必然存在（v0.2 只在广告命中时写，
         // 从未命中就没文件，用户找不到）。路径：%AppData%/SpotifyLyricsWin/log.txt
         AppLog.EnsureFile();
-        AppLog.Write("[启动] SpotifyLyricsWin v0.5 启动");
+        AppLog.Write("[启动] SpotifyLyricsWin v0.6 启动");
 
         // v0.4：先看上次自动更新的结果（Updater 写的 update-result.json），汇报一次后删掉
         var lastResult = UpdateService.ReadResult();
@@ -60,6 +87,11 @@ public static class Program
         }
 
         _settings = Settings.Load();
+        // v0.6 多主题：先把调色板切到用户选的那套，之后所有窗口构造时读到的都是它
+        Theme.Apply(_settings.UiTheme);
+        // v0.6 Fluent 外壳（WPF-UI）：合并库的主题/控件资源字典并套当前主题，
+        // 必须赶在设置窗/选词窗创建之前（它们构造时就靠这些资源渲染）。
+        InitFluentUi();
         _tracker = new SmtcTracker();
         _service = new LyricsService(_settings);
         _engine = new LyricsSyncEngine();
@@ -75,8 +107,10 @@ public static class Program
         _floating.RefetchRequested += () =>
         {
             var t = _tracker.Current;
-            if (t != null && !_isAd) StartFetch(t, skipCache: true);
+            if (t != null && !_isAd && !_isInstrumental) StartFetch(t, skipCache: true, manual: true);
         };
+        _floating.NotAdRequested += OnNotAd;
+        _floating.ToggleInstrumentalRequested += OnToggleInstrumental;
         if (_settings.FloatingEnabled) _floating.Show();
         _floating.SetHint(_statusHint);
         _floating.SetDimmed(true);
@@ -93,8 +127,10 @@ public static class Program
         _tray.RefetchLyrics += () =>
         {
             var t = _tracker.Current;
-            if (t != null && !_isAd) StartFetch(t, skipCache: true);
+            if (t != null && !_isAd && !_isInstrumental) StartFetch(t, skipCache: true, manual: true);
         };
+        _tray.NotAd += OnNotAd;
+        _tray.ToggleInstrumental += OnToggleInstrumental;
         _tray.OpenLog += OpenLogFile;
         _tray.BalloonClicked += OpenSettings;
         _tray.ExitApp += () =>
@@ -118,12 +154,17 @@ public static class Program
                 _notFound = false;
                 _isAd = false;
                 _adKey = "";
+                _isInstrumental = false;
+                _instrumentalKey = "";
+                _pendingRetryKey = "";
                 _statusHint = "♪ 等待 Spotify 播放";
+                SyncAdInstrumentalUi();
                 return;
             }
 
-            // 广告识别（启发式）：命中则不取词、不推进，tick 里显示广告提示；结束自动恢复
-            var verdict = AdDetector.Check(track);
+            // 广告识别（启发式）：命中则不取词、不推进，tick 里显示广告提示；结束自动恢复。
+            // v0.6：判定带上用户「这不是广告」抑制名单，名单内的曲目永不判广告。
+            var verdict = AdDetector.Check(track, _settings.NotAdKeys);
             if (verdict.IsAd)
             {
                 if (!_isAd)
@@ -134,6 +175,7 @@ public static class Program
                         $"专辑=「{track.Album}」 时长={track.DurationMs}ms 命中规则：{verdict.Rule}");
                     _tray.SetStatus("SpotifyLyrics - 广告播放中");
                 }
+                SyncAdInstrumentalUi();
                 return;
             }
             if (_isAd)
@@ -141,6 +183,44 @@ public static class Program
                 _isAd = false;
                 _adKey = "";
                 AppLog.Write("[广告识别] 广告结束，恢复歌词同步");
+            }
+
+            // v0.6 纯音乐：已标记（手动或标题特征自动标记）→ 不取词，tick 显示「纯音乐」提示。
+            bool marked = InstrumentalMarks.IsMarked(_settings, track.Key);
+            if (!marked && InstrumentalMarks.TitleLooksInstrumental(track.Title))
+            {
+                InstrumentalMarks.Mark(_settings, track.Key);
+                marked = true;
+                AppLog.Write($"[纯音乐] 标题特征自动标记：「{track.Title} - {track.Artist}」，跳过取词");
+            }
+            if (marked)
+            {
+                if (!_isInstrumental || _instrumentalKey != track.Key)
+                {
+                    _isInstrumental = true;
+                    _instrumentalKey = track.Key;
+                    _fetchCts?.Cancel();
+                    _fetchingKey = "";
+                    _engine.Lyrics = null;
+                    _loadedKey = track.Key; // 占位防重复触发；取消标记时由处理函数清掉
+                    _notFound = false;
+                    _tray.SetStatus($"SpotifyLyrics - 纯音乐：{track.Title}");
+                }
+                SyncAdInstrumentalUi();
+                return;
+            }
+            if (_isInstrumental) { _isInstrumental = false; _instrumentalKey = ""; }
+
+            SyncAdInstrumentalUi();
+
+            // v0.6：网络型失败耗尽后的延迟重试（60 秒后自动再试一次，不再「失败即永久放弃」）
+            if (_pendingRetryKey == track.Key && Environment.TickCount64 >= _pendingRetryAtTick
+                && track.Key != _fetchingKey)
+            {
+                _pendingRetryKey = "";
+                AppLog.Write($"[取词] 「{track.Title}」 网络失败后的延迟重试（60s）");
+                StartFetch(track, skipCache: false);
+                return;
             }
 
             if (track.Key != _loadedKey && track.Key != _fetchingKey)
@@ -153,26 +233,188 @@ public static class Program
         tick.Tick += (_, _) => OnTick();
         tick.Start();
 
-        // v0.4：启动后静默查一次更新（填了令牌才查；有新版才用气泡提醒，不弹窗打断听歌）
+        // 启动后静默查一次更新（v0.4 起；v0.6 仓库转公开后无令牌也查——匿名检查；
+        // 有新版才用气泡提醒，不弹窗打断听歌；失败只记限频日志不打扰用户）
         _ = Task.Run(async () =>
         {
             await Task.Delay(5000);
-            if (string.IsNullOrWhiteSpace(_settings.GithubToken)) return;
             try
             {
                 var result = await UpdateService.CheckLatestAsync(_settings.GithubToken);
                 Application.Current?.Dispatcher.Invoke(() => HandleCheckResult(result, manual: false));
             }
-            catch { /* 静默检查失败不打扰用户 */ }
+            catch (Exception ex)
+            {
+                AppLog.WriteLimited("silent-update-check",
+                    $"[自动更新] 静默检查异常：{ex.GetType().Name}: {ex.Message}", 60_000);
+            }
         });
 
         app.Run();
     }
 
+    /// <summary>
+    /// v0.6：三路全局异常捕获，统一走 AppLog.LogException 落盘（该方法即无头测试的被测对象）。
+    /// Dispatcher 路标记 Handled 保命；AppDomain 路是最后遗言，只能落盘；
+    /// TaskScheduler 路 SetObserved 防止未观察异常在终结器线程上升级。
+    /// </summary>
+    private static void RegisterGlobalExceptionHandlers(Application app)
+    {
+        app.DispatcherUnhandledException += (_, e) =>
+        {
+            AppLog.LogException("DispatcherUnhandledException（已标记 Handled 保命）", e.Exception);
+            e.Handled = true;
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            AppLog.LogException("AppDomain.UnhandledException（进程即将退出）",
+                e.ExceptionObject as Exception
+                ?? new Exception("非 Exception 对象：" + (e.ExceptionObject?.ToString() ?? "null")));
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.LogException("TaskScheduler.UnobservedTaskException（已 SetObserved）", e.Exception);
+            e.SetObserved();
+        };
+    }
+
+    /// <summary>v0.6：把广告/纯音乐状态同步到悬浮窗右击菜单与托盘菜单的可用性/文案。</summary>
+    private static void SyncAdInstrumentalUi()
+    {
+        _floating.IsAdShowing = _isAd;
+        var t = _tracker.Current;
+        bool marked = t != null && InstrumentalMarks.IsMarked(_settings, t.Key);
+        _floating.IsInstrumental = marked;
+        _tray.SetAdState(_isAd);
+        _tray.SetInstrumentalState(marked);
+    }
+
+    /// <summary>
+    /// v0.6「这不是广告」（悬浮窗右击菜单 / 托盘共用）：把当前曲 Key 记入抑制名单
+    /// （存设置、上限 200），同曲永不再判广告；正在判广告的立刻解除并恢复取词。
+    /// </summary>
+    private static void OnNotAd()
+    {
+        var t = _tracker.Current;
+        if (t == null) return;
+        Settings.AddCapped(_settings.NotAdKeys, t.Key, 200);
+        _settings.RequestSave();
+        AppLog.Write($"[广告识别] 用户标记「这不是广告」：「{t.Title} - {t.Artist}」" +
+            $"（抑制名单共 {_settings.NotAdKeys.Count} 条，该曲不再判广告）");
+        if (_isAd) { _isAd = false; _adKey = ""; }
+        _loadedKey = "";
+        _notFound = false;
+        SyncAdInstrumentalUi();
+        if (!_isInstrumental) StartFetch(t, skipCache: false);
+    }
+
+    /// <summary>
+    /// v0.6 纯音乐标记切换（悬浮窗右击菜单 / 托盘 / 手动选词窗共用语义）：
+    /// 已标记 → 取消并恢复取词；未标记 → 标记、停掉在途取词、清掉当前歌词。
+    /// </summary>
+    private static void OnToggleInstrumental()
+    {
+        var t = _tracker.Current;
+        if (t == null) return;
+        if (InstrumentalMarks.IsMarked(_settings, t.Key))
+        {
+            InstrumentalMarks.Unmark(_settings, t.Key);
+            AppLog.Write($"[纯音乐] 用户取消标记：「{t.Title} - {t.Artist}」，恢复取词");
+            _isInstrumental = false;
+            _instrumentalKey = "";
+            _loadedKey = "";
+            SyncAdInstrumentalUi();
+            if (!_isAd) StartFetch(t, skipCache: false);
+        }
+        else
+        {
+            InstrumentalMarks.Mark(_settings, t.Key);
+            AppLog.Write($"[纯音乐] 用户手动标记：「{t.Title} - {t.Artist}」，停止取词");
+            _fetchCts?.Cancel();
+            _fetchingKey = "";
+            _engine.Lyrics = null;
+            _isInstrumental = true;
+            _instrumentalKey = t.Key;
+            _loadedKey = t.Key;
+            _notFound = false;
+            _tray.SetStatus($"SpotifyLyrics - 纯音乐：{t.Title}");
+            SyncAdInstrumentalUi();
+        }
+    }
+
+    /// <summary>
+    /// v0.6：合并 WPF-UI 的主题与控件资源字典（零 XAML 的代码路径），并套当前预设。
+    /// 四套预设与库主题系统的对齐方式：Spotify 深色 = Dark；纯黑 = Dark + 底色资源覆写；
+    /// 深蓝 = Dark + 蓝系底色资源覆写；浅色 = Light。强调色都走库的强调色管理器
+    /// （深色三套 Spotify 绿、浅色套深绿，与自家调色板 Theme.Palettes 同一份色值）。
+    /// </summary>
+    private static void InitFluentUi()
+    {
+        var res = Application.Current.Resources;
+        res.MergedDictionaries.Add(new ThemesDictionary
+        {
+            Theme = Theme.Current.IsLight ? ApplicationTheme.Light : ApplicationTheme.Dark
+        });
+        res.MergedDictionaries.Add(new ControlsDictionary());
+        ApplyFluentTheme();
+    }
+
+    private static readonly List<string> _fluentOverrideKeys = new();
+
+    /// <summary>把当前 Theme 调色板套到 WPF-UI 主题系统上（切换预设时重调用）。</summary>
+    private static void ApplyFluentTheme()
+    {
+        var palette = Theme.Current;
+        var theme = palette.IsLight ? ApplicationTheme.Light : ApplicationTheme.Dark;
+        ApplicationThemeManager.Apply(theme);
+        ApplicationAccentColorManager.Apply(palette.Accent, theme);
+
+        var res = Application.Current.Resources;
+        foreach (string k in _fluentOverrideKeys) res.Remove(k);
+        _fluentOverrideKeys.Clear();
+        if (palette.Id is "pure-black" or "deep-blue")
+        {
+            SetOverride("ApplicationBackgroundBrush", palette.Bg);
+            SetOverride("CardBackgroundFillColorDefaultBrush", palette.Panel);
+        }
+        void SetOverride(string key, Color color)
+        {
+            res[key] = Theme.Brush(color);
+            _fluentOverrideKeys.Add(key);
+        }
+    }
+
+    /// <summary>
+    /// v0.6 主题切换：套新调色板 + Fluent 主题后，把已打开的设置窗/选词窗关掉重开整体换装
+    /// （窗口构造时才读取资源/调色板；位置记忆保证重开回到原位，代价是滚动位置重置）。
+    /// </summary>
+    private static void OnThemeChanged()
+    {
+        Theme.Apply(_settings.UiTheme);
+        ApplyFluentTheme();
+        AppLog.Write($"[设置] 界面主题切换为「{Theme.Current.DisplayName}」（{_settings.UiTheme}）");
+        if (_manualWindow != null) { var m = _manualWindow; _manualWindow = null; m.Close(); }
+        if (_settingsWindow != null)
+        {
+            var w = _settingsWindow;
+            _settingsWindow = null;
+            w.Close();
+        }
+        OpenSettings();
+    }
+
     private static void OpenSettings()
     {
         if (_settingsWindow != null) { _settingsWindow.Activate(); return; }
-        _settingsWindow = new SettingsWindow(_settings);
+        try { _settingsWindow = new SettingsWindow(_settings); }
+        catch (Exception ex)
+        {
+            // v0.6：窗口打开异常必须留痕（v0.5.0 设置窗崩溃时用户只能口述「打不开」）
+            AppLog.LogException("打开设置窗", ex);
+            _settingsWindow = null;
+            _tray.SetStatus("SpotifyLyrics - 设置窗打开失败，详情见日志");
+            return;
+        }
         // v0.2：设置实时生效——每次变更立刻重套悬浮窗样式（落盘由设置窗内的防抖处理）
         _settingsWindow.LiveChanged += () => _floating.ApplyStyle();
         _settingsWindow.OpenLogRequested += OpenLogFile;
@@ -183,6 +425,10 @@ public static class Program
             var r = await UpdateService.CheckLatestAsync(_settings.GithubToken);
             HandleCheckResult(r, manual: true);
         };
+        // v0.6：主题切换（关掉重开换装）与纯音乐名单清空（记一行日志）
+        _settingsWindow.ThemeChanged += OnThemeChanged;
+        _settingsWindow.InstrumentalMarksChanged += () =>
+            AppLog.Write("[设置] 纯音乐标记名单已清空");
         _settingsWindow.InstallUpdateRequested += RunInstallUpdate;
         _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         if (_pendingRelease != null)
@@ -314,12 +560,13 @@ public static class Program
         }
         else
         {
-            var v = AdDetector.Check(track);
-            signature = $"{track.Key}|{track.Album}|{track.DurationMs}|{track.HasCover}|{track.IsPlaying}|{v.IsAd}";
+            var v = AdDetector.Check(track, _settings.NotAdKeys);
+            string controls = _tracker.LastControlsSummary;
+            signature = $"{track.Key}|{track.Album}|{track.DurationMs}|{track.HasCover}|{track.IsPlaying}|{v.IsAd}|{controls}";
             line = $"[SMTC] 标题=「{track.Title}」 歌手=「{track.Artist}」 专辑=「{track.Album}」 " +
                    $"时长={(track.DurationMs > 0 ? (track.DurationMs / 1000) + "s" : "未知")} " +
                    $"封面={(track.HasCover ? "有" : "无")} 状态={(track.IsPlaying ? "播放" : "暂停")} " +
-                   $"判定={(v.IsAd ? $"广告（{v.Rule}）" : "歌曲")}";
+                   $"判定={(v.IsAd ? $"广告（{v.Rule}）" : "歌曲")} 动作[{controls}]";
         }
         if (signature == _lastLogSignature) return;
         _lastLogSignature = signature;
@@ -330,7 +577,15 @@ public static class Program
     {
         if (_manualWindow != null) { _manualWindow.Activate(); return; }
         var t = _tracker.Current;
-        _manualWindow = new ManualLyricsWindow(t?.Title ?? "", t?.Artist ?? "", _settings);
+        try { _manualWindow = new ManualLyricsWindow(t?.Title ?? "", t?.Artist ?? "", _settings); }
+        catch (Exception ex)
+        {
+            // v0.6：窗口打开异常留痕（手动选词正是用户报「打开就退出」的路径，必须能查）
+            AppLog.LogException("打开手动选词窗", ex);
+            _manualWindow = null;
+            _tray.SetStatus("SpotifyLyrics - 手动选词窗打开失败，详情见日志");
+            return;
+        }
         _manualWindow.SearchAsync = (title, artist, ct) =>
             _service.SearchCandidatesAsync(title, artist, ct);
         _manualWindow.ApplyAsync = async candidate =>
@@ -346,11 +601,25 @@ public static class Program
             _tray.SetStatus($"SpotifyLyrics - 歌词：{outcome.SourceName}（手动）｜{track.Title}");
             return true;
         };
+        // v0.6：窗内「标记为纯音乐」——只在当前未标记时才切换（按钮语义是单向标记）
+        _manualWindow.MarkInstrumentalRequested += () =>
+        {
+            var track = _tracker.Current;
+            if (track != null && !InstrumentalMarks.IsMarked(_settings, track.Key))
+                OnToggleInstrumental();
+        };
         _manualWindow.Closed += (_, _) => _manualWindow = null;
         _manualWindow.Show();
     }
 
-    private static void StartFetch(TrackInfo track, bool skipCache)
+    /// <summary>
+    /// 发起取词。v0.6 重做失败处理（借鉴清单 #1，蓝本 V2.4 的重试纪律）：
+    /// 失败先分类——网络型才退避重试（自动取词最多 3 次、间隔 6s×次数；手动重搜 1 次），
+    /// 没收录/解析型立即收手；网络型重试用尽后不像 v0.5 那样把 Key 永久锁死，
+    /// 而是登记 60 秒后的一次延迟重试（ poll 驱动），给网络恢复留机会。
+    /// 取词成功且无译文时，后台再向网易云补一次 tlyric（不阻塞显示）。
+    /// </summary>
+    private static void StartFetch(TrackInfo track, bool skipCache, bool manual = false)
     {
         _fetchCts?.Cancel();
         _fetchCts = new CancellationTokenSource();
@@ -360,37 +629,93 @@ public static class Program
         _statusHint = "♪ 正在找歌词…";
         _tray.SetStatus($"SpotifyLyrics - 正在找歌词：{track.Title}");
         string key = track.Key;
+        int maxAttempts = manual ? 1 : 3;
         _ = Task.Run(async () =>
         {
-            FetchOutcome? outcome = null;
-            try { outcome = await _service.FetchAsync(track, skipCache, ct); }
+            LyricsService.FetchReport? report = null;
+            try
+            {
+                for (int attempt = 1; ; attempt++)
+                {
+                    report = await _service.FetchReportAsync(track, skipCache, ct);
+                    if (report.Outcome != null) break;
+                    if (report.Failure != LyricsService.FetchFailureKind.Network) break;
+                    if (attempt >= maxAttempts) break;
+                    int delayMs = 6000 * attempt; // V2.4 §2.7：网络型退避 6s × 第几次
+                    AppLog.Write($"[取词] 「{track.Title}」 网络型失败（{report.Detail}），{delayMs / 1000}s 后重试（{attempt + 1}/{maxAttempts}）");
+                    await Task.Delay(delayMs, ct);
+                }
+            }
             catch (OperationCanceledException) { return; }
-            catch { /* 服务内已兜底，这里再防一层 */ }
+            catch (Exception ex) { AppLog.LogException("取词任务", ex); }
 
+            var finalReport = report;
             Application.Current?.Dispatcher.Invoke(() =>
             {
                 if (ct.IsCancellationRequested) return;
                 if (_tracker.Current?.Key != key) return; // 已经切歌了
                 _fetchingKey = "";
+                var outcome = finalReport?.Outcome;
                 if (outcome != null)
                 {
                     _engine.Lyrics = outcome.Lyrics;
                     _loadedKey = key;
+                    _pendingRetryKey = "";
                     _tray.SetStatus($"SpotifyLyrics - 歌词：{outcome.SourceName}｜{track.Title}");
                     AppLog.Write($"[取词] 「{track.Title}」 命中 {outcome.SourceName}" +
                         (outcome.Score >= 0 ? $" 打分={outcome.Score} 候选=「{outcome.CandidateTitle}」" : "（顺序回退）") +
                         $" 逐字={outcome.Lyrics.IsWordLevel} 行数={outcome.Lyrics.Lines.Count}");
+                    MaybeBackfillTranslation(track, outcome);
                 }
                 else
                 {
                     _engine.Lyrics = null;
-                    _loadedKey = key; // 记住已试过，避免每 500ms 重试拖死接口；手动「重新搜词」可再来
                     _notFound = true;
                     _tray.SetStatus($"SpotifyLyrics - 未找到歌词：{track.Title}");
-                    AppLog.Write($"[取词] 「{track.Title}」 所有源均未命中（可手动选词）");
+                    if (finalReport?.Failure == LyricsService.FetchFailureKind.Network)
+                    {
+                        // 网络型：不锁死 Key，60 秒后自动再试一次（切歌会在 poll 里清掉登记）
+                        _loadedKey = "";
+                        _pendingRetryKey = key;
+                        _pendingRetryAtTick = Environment.TickCount64 + 60_000;
+                        AppLog.Write($"[取词] 「{track.Title}」 网络型失败耗尽重试（{finalReport.Detail}），已登记 60s 后自动重试");
+                    }
+                    else
+                    {
+                        _loadedKey = key; // 没收录/解析型：记住已试过，避免每 500ms 重试拖死接口；手动「重新搜词」可再来
+                        AppLog.Write($"[取词] 「{track.Title}」 未命中：{finalReport?.Detail}（可手动选词）");
+                    }
                 }
             });
         }, ct);
+    }
+
+    /// <summary>
+    /// v0.6 后台补译：主源歌词没有可用译文且设置允许时，向网易云补 tlyric，
+    /// 补到后若仍是同一首歌、且引擎里还是同一份歌词对象，就无缝换上（并已写缓存）。
+    /// 全程后台进行，不阻塞首屏显示；失败静默（下次取词还会再试缓存/主源）。
+    /// </summary>
+    private static void MaybeBackfillTranslation(TrackInfo track, FetchOutcome outcome)
+    {
+        if (!_settings.ShowTranslation) return;
+        if (LyricsService.HasUsableTranslation(outcome.Lyrics)) return;
+        string key = track.Key;
+        var original = outcome.Lyrics;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var merged = await _service.FetchTranslationBackupAsync(track, original, CancellationToken.None);
+                if (merged == null) return;
+                Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    if (_tracker.Current?.Key != key) return;
+                    if (!ReferenceEquals(_engine.Lyrics, original)) return; // 已被手动选词等换掉
+                    _engine.Lyrics = merged;
+                });
+            }
+            catch (Exception ex) { AppLog.LogException("后台补译", ex); }
+        });
     }
 
     private static void OnTick()
@@ -411,6 +736,14 @@ public static class Program
             return;
         }
 
+        // v0.6 纯音乐：显示「纯音乐」小提示，而不是误导性的「未找到歌词」
+        if (_isInstrumental && track.Key == _instrumentalKey)
+        {
+            _floating.SetDimmed(!track.IsPlaying);
+            if (_settings.FloatingEnabled) _floating.SetHint("♪ 纯音乐 · 无歌词");
+            return;
+        }
+
         _floating.SetDimmed(!track.IsPlaying);
         // v0.5：进度改读 ProgressClock 的平滑显示进度（observe 校正、无死区硬跳）；
         // 时钟暂无样本时回退到曲目自带外推兜底。
@@ -421,7 +754,10 @@ public static class Program
         var lyrics = _engine.Lyrics;
         if (lyrics == null || _loadedKey != track.Key)
         {
-            _floating.SetHint(_notFound && _loadedKey == track.Key ? "未找到歌词" : "♪ 正在找歌词…");
+            // v0.6：网络失败待重试（_pendingRetryKey）也算「已确认没找到」，别一直显示找词中
+            bool confirmedNotFound = _notFound &&
+                (_loadedKey == track.Key || _pendingRetryKey == track.Key);
+            _floating.SetHint(confirmedNotFound ? "未找到歌词" : "♪ 正在找歌词…");
             return;
         }
 

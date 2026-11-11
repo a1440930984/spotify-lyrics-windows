@@ -50,8 +50,9 @@ public sealed class UpdateResult
 }
 
 /// <summary>
-/// v0.4 自动更新：查 GitHub 私有仓 Release（只读令牌）→ 下载 zip 资产 → 交给独立 Updater 换版。
-/// 仓库保持私有，令牌只存本机、只在请求 GitHub API 时带上。
+/// v0.4 自动更新：查 GitHub Release → 下载 zip 资产 → 交给独立 Updater 换版。
+/// v0.6：仓库已转公开，无令牌时匿名检查/下载；令牌框保留（可选）——填了优先带令牌，
+/// 将来仓库切回私有填上即用。令牌只存本机、只在请求 GitHub API 时带上。
 /// 本类只用 BCL（无 WPF 依赖），纯逻辑部分（版本比较/JSON 解析）可无头测试。
 /// </summary>
 public static class UpdateService
@@ -118,31 +119,41 @@ public static class UpdateService
 
     // ---------- 网络 ----------
 
-    private static HttpRequestMessage NewRequest(string url, string token, string accept)
+    private static HttpRequestMessage NewRequest(string url, string? token, string accept)
     {
         var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        // v0.6：仓库已转公开——有令牌优先带令牌（私有化时无缝切回），无令牌走匿名（公开仓可用）。
+        if (!string.IsNullOrWhiteSpace(token))
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
         req.Headers.UserAgent.ParseAdd("SpotifyLyricsWin");
         req.Headers.Accept.ParseAdd(accept);
         return req;
     }
 
-    /// <summary>查最新 Release。无令牌返回 NoToken；任何失败返回 Failed + 人话原因。</summary>
+    /// <summary>
+    /// 查最新 Release（v0.6 起无令牌也查：仓库公开后匿名可读）。
+    /// 任何失败返回 Failed + 人话原因，文案按「有没有令牌」区分。
+    /// </summary>
     public static async Task<UpdateCheckResult> CheckLatestAsync(string token, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(token))
-            return new UpdateCheckResult(UpdateCheckKind.NoToken, null, "未填 GitHub 只读令牌，无法检查更新。");
+        bool hasToken = !string.IsNullOrWhiteSpace(token);
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-            using var req = NewRequest(LatestApi, token.Trim(), "application/vnd.github+json");
+            using var req = NewRequest(LatestApi, token, "application/vnd.github+json");
             using var resp = await http.SendAsync(req, ct);
             string body = await resp.Content.ReadAsStringAsync(ct);
             if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
                 resp.StatusCode == System.Net.HttpStatusCode.Forbidden ||
                 resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                // 私有仓对匿名/无权请求统一回 404（不泄露存在性），两种情形分开提示
+                if (!hasToken)
+                    return new UpdateCheckResult(UpdateCheckKind.Failed, null,
+                        $"GitHub 查不到这个仓库的 Release（{(int)resp.StatusCode}）。仓库可能仍是私有（私有仓需在下方填只读令牌），或暂无 Release，也可能是网络问题。");
                 return new UpdateCheckResult(UpdateCheckKind.Failed, null,
                     $"GitHub 拒绝了请求（{(int)resp.StatusCode}）。多半是令牌不对、已过期，或没勾这个仓库的只读权限。");
+            }
             if (!resp.IsSuccessStatusCode)
                 return new UpdateCheckResult(UpdateCheckKind.Failed, null,
                     $"检查更新失败：GitHub 返回 {(int)resp.StatusCode}，请稍后重试。");

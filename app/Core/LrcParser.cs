@@ -28,6 +28,9 @@ public static class LrcParser
             if (tags.Count == 0) continue;
             string body = TimeTag.Replace(raw, "").Trim();
             if (body.Length == 0) continue;
+            // v0.6：元数据行过滤（借鉴 V2.4 cleanMetaLines）：作词/作曲等行带时间标签、
+            // 会混进正文显示、还会把译文按行序兜底整体带偏，解析时直接跳过。
+            if (IsMetaLine(body)) continue;
             var (text, charTimes) = SplitWordTags(body, offsetMs);
             if (text.Length == 0) continue;
             foreach (Match m in tags)
@@ -116,14 +119,65 @@ public static class LrcParser
             $"[{v / 60000L:00}:{(v % 60000L) / 1000L:00}.{v % 1000L / 10:00}]");
     }
 
-    /// <summary>把译文 LRC 按时间戳对齐到主歌词行（精确时间戳匹配，安安卓 tlyric 对齐方式）</summary>
+    private static readonly Regex MetaLine = new(
+        @"^(作词|作曲|编曲|制作人|出品人|出品|监制|和声|合声|录音|混音|母带|吉他|贝斯|鼓|键盘|弦乐|琵琶|二胡|笛子|演奏|演唱|原唱|词|曲|OP|SP|发行)\s*[:：]",
+        RegexOptions.Compiled);
+
+    /// <summary>是否是「作词：xx」类元数据行（供 Parse 过滤与测试）。</summary>
+    public static bool IsMetaLine(string text) =>
+        !string.IsNullOrWhiteSpace(text) && MetaLine.IsMatch(text.Trim());
+
+    /// <summary>
+    /// 把译文 LRC 对齐到主歌词行（v0.6 重写，蓝本 LyricFlow Translation.kt 的 merge()，
+    /// 替换 v0.5 以前的「精确时间戳字典匹配」——差 1ms 就整行丢弃，跨源贴译文几乎全空）：
+    /// ① 最近行匹配：每行原文找时间差最小的未用译文行，容差 4000ms（含等于），
+    ///    一对一占用（used[] 防同一译文行被贴两次）；
+    /// ② 命中率（有译文的非空原文行 / 非空原文行）&lt;40% 时退回按行序对齐：
+    ///    双方各自跳过空行、逐行顺贴。
+    /// </summary>
     public static List<string> AlignTranslations(Lyrics main, Lyrics trans)
     {
-        var byTime = new Dictionary<long, string>();
-        foreach (var l in trans.Lines) byTime[l.TimeMs] = l.Text;
-        var list = new List<string>(main.Lines.Count);
-        foreach (var l in main.Lines)
-            list.Add(byTime.TryGetValue(l.TimeMs, out string? t) ? t : "");
+        int n = main.Lines.Count;
+        var mapped = new string?[n];
+        var used = new bool[trans.Lines.Count];
+        int hits = 0;
+
+        for (int i = 0; i < n; i++)
+        {
+            long t = main.Lines[i].TimeMs;
+            int best = -1;
+            long bestDiff = 4000;
+            for (int j = 0; j < trans.Lines.Count; j++)
+            {
+                if (used[j]) continue;
+                long d = Math.Abs(trans.Lines[j].TimeMs - t);
+                if (d <= bestDiff) { bestDiff = d; best = j; }
+            }
+            if (best >= 0)
+            {
+                used[best] = true;
+                string s = trans.Lines[best].Text.Trim();
+                if (s.Length > 0) { mapped[i] = s; hits++; }
+            }
+        }
+
+        int valid = main.Lines.Count(l => !string.IsNullOrWhiteSpace(l.Text));
+        double hitRate = valid > 0 ? (double)hits / valid : 0;
+        if (valid > 0 && hitRate < 0.40)
+        {
+            // 行序兜底：清掉时间轴结果，双方跳空行顺贴
+            Array.Clear(mapped);
+            int k = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (string.IsNullOrWhiteSpace(main.Lines[i].Text)) continue;
+                while (k < trans.Lines.Count && string.IsNullOrWhiteSpace(trans.Lines[k].Text)) k++;
+                if (k < trans.Lines.Count) mapped[i] = trans.Lines[k++].Text.Trim();
+            }
+        }
+
+        var list = new List<string>(n);
+        for (int i = 0; i < n; i++) list.Add(mapped[i] ?? "");
         return list;
     }
 }

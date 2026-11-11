@@ -10,7 +10,9 @@ public enum ClockAction
     /// <summary>中偏差（300ms~2500ms）：速率补偿收敛中，不硬跳、不倒退。</summary>
     Compensating,
     /// <summary>偏差 >2500ms：视为 seek，硬跳到样本。</summary>
-    SeekSnap
+    SeekSnap,
+    /// <summary>v0.6：0 样本防护命中，样本被忽略（见 ProgressClock.Observe）。</summary>
+    IgnoredZero
 }
 
 /// <summary>
@@ -77,6 +79,18 @@ public sealed class ProgressClock
     public ClockAction Observe(long samplePosMs, long sampleAtMs, bool isPlaying, long durationMs)
     {
         long now = _nowMs();
+
+        // v0.6：0 样本防护（借鉴 LyricFlow PlaybackClock 条件式 `posMs<=0 && anchorPos>1500` 才忽略）。
+        // 播放中段 SMTC 偶发给出 Position=0（如广告切换/会话重建），若照单全收，
+        // 偏差 >2500ms 会被当成 seek 硬跳，把歌词拉回开头。锚点还在开头 1.5s 内时 0 是
+        // 合法值（真开头），不忽略。仅播放中生效：暂停样本是权威值（暂停 seek 到 0 必须认）。
+        // 代价：单曲循环回到 0 的那一个样本会被忽略，靠后续 >0 的样本按 seek 拉回（已被时长钳制兜住）。
+        if (isPlaying && samplePosMs <= 0 && _hasSample && RawPosition(now) > 1500)
+        {
+            LastDeviationMs = 0;
+            return LastAction = ClockAction.IgnoredZero;
+        }
+
         _durationMs = durationMs;
         // 样本折算到「现在」：播放中位置随时间走，暂停时就停在样本位置
         long sampleNow = isPlaying ? samplePosMs + Math.Max(0, now - sampleAtMs) : samplePosMs;

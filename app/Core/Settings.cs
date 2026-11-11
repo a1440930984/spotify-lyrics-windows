@@ -37,6 +37,18 @@ public sealed class Settings
     /// <summary>v0.5 新增：手动选词窗位置记忆（颜色盘明确不记忆，每次居中于所有者）</summary>
     public double? ManualWindowX { get; set; }
     public double? ManualWindowY { get; set; }
+    /// <summary>v0.6 新增：界面主题 id（spotify-dark / pure-black / deep-blue / light），见 Ui.Theme.Palettes</summary>
+    public string UiTheme { get; set; } = "spotify-dark";
+    /// <summary>
+    /// v0.6 新增：纯音乐标记（曲目 Key 集合，借鉴 LyricFlow instrumentalKeys，上限 500，超限淘汰最旧）。
+    /// 命中标记的曲目不再联网取词，悬浮窗显示「纯音乐」提示。
+    /// </summary>
+    public List<string> InstrumentalKeys { get; set; } = new();
+    /// <summary>
+    /// v0.6 新增：「这不是广告」抑制名单（曲目 Key 集合，上限 200，超限淘汰最旧）。
+    /// 名单内的曲目永远不判广告（用户人工纠偏，粒度按 Key 而非全局时长）。
+    /// </summary>
+    public List<string> NotAdKeys { get; set; } = new();
 
     public void Normalize()
     {
@@ -46,6 +58,25 @@ public sealed class Settings
         if (!IsValidHex(TextColorHex)) TextColorHex = "#FFFFFFFF";
         if (!IsValidHex(HighlightColorHex)) HighlightColorHex = "#FF1ED760";
         if (string.IsNullOrWhiteSpace(FontFamily)) FontFamily = "Microsoft YaHei UI";
+        if (string.IsNullOrWhiteSpace(UiTheme)) UiTheme = "spotify-dark";
+        InstrumentalKeys ??= new List<string>();
+        NotAdKeys ??= new List<string>();
+        TrimToCap(InstrumentalKeys, 500);
+        TrimToCap(NotAdKeys, 200);
+    }
+
+    /// <summary>集合限长：只保留最近 cap 条（列表尾部最新），淘汰最旧。</summary>
+    public static void TrimToCap(List<string> list, int cap)
+    {
+        if (list.Count > cap) list.RemoveRange(0, list.Count - cap);
+    }
+
+    /// <summary>往限长集合里加一个 key（已有则先删再加到尾部，保持「最近」语义）。</summary>
+    public static void AddCapped(List<string> list, string key, int cap)
+    {
+        list.Remove(key);
+        list.Add(key);
+        TrimToCap(list, cap);
     }
 
     public static bool IsValidHex(string? s)
