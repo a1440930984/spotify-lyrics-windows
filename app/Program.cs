@@ -129,6 +129,10 @@ public static class Program
         _floating.SetDimmed(true);
         // v0.8.3：透明自检探针——启动 5 秒后采一次悬浮窗的屏幕实际像素（只记录）
         ScheduleTransparencyProbe(5000);
+        // v0.8.4：实锤日志——变白案的关键变量就是 Application.MainWindow 指向
+        // 谁（WPF-UI 的主题应用只对 MainWindow 做系统背景层处理）。如实记录
+        // 此刻的类型名；若不是 FloatingWindow 也照记，排查时一眼见分晓。
+        AppLog.Write($"[主窗口] MainWindow={_app.MainWindow?.GetType().Name ?? "null"}");
 
         _tray = new Tray();
         _tray.ToggleFloating += () =>
@@ -442,7 +446,22 @@ public static class Program
     {
         var palette = Theme.Current;
         var theme = palette.IsLight ? ApplicationTheme.Light : ApplicationTheme.Dark;
-        ApplicationThemeManager.Apply(theme);
+        // v0.8.4 变白案真凶（读 WPF-UI 4.3.0 源码实锤）：Apply 的默认参数
+        // backgroundEffect = Mica，其实现末尾会拿 Application.MainWindow 调
+        // WindowBackgroundManager.UpdateBackground(..., Mica)——给该窗口糊一层
+        // DWM 系统背景（Mica，还顺手在 Win11 上 RemoveBackground 把 WPF 背景
+        // 抹成 null）。本 App 第一个创建的窗口就是悬浮窗、且从未显式设过
+        // MainWindow，于是 MainWindow = 悬浮窗：启动时它还没 Loaded、这层糊
+        // 了个空（初启透明）；每次切主题都会对已 Loaded 的悬浮窗糊实（变白/
+        // 发雾，探针四角纯白、属性诊断却全透明，正是这层 WPF 不可见的 DWM 材质）。
+        // 修法：明确传 WindowBackdropType.None 从源头关掉这步。设置窗/选词窗
+        // 各自的背景走它们 FluentWindow 的 WindowBackdropType = Theme.Backdrop，
+        // 与这个全局参数无关、不受影响。
+        // updateAccent 传 false：强调色紧接着由下面一行
+        // ApplicationAccentColorManager.Apply(palette.Accent, ...) 单独套用
+        // （一直以来的口径）；若让 Apply 内部先套一遍系统强调色纯属重复，
+        // 最终值不变、只多一次中间态，故关掉。
+        ApplicationThemeManager.Apply(theme, Wpf.Ui.Controls.WindowBackdropType.None, updateAccent: false);
         ApplicationAccentColorManager.Apply(palette.Accent, theme);
 
         var res = Application.Current.Resources;
@@ -472,6 +491,33 @@ public static class Program
             res[key] = color;
             _fluentOverrideKeys.Add(key);
         }
+
+        // 主题应用完成后的兜底清理（v0.8.4，详见 StripFloatingBackdrop）：
+        // InitFluentUi 时悬浮窗还没创建、自动跳过；切主题时摘层 + 重申样式。
+        StripFloatingBackdrop();
+    }
+
+    /// <summary>
+    /// v0.8.4 兜底清理：把悬浮窗上可能已被糊上的 DWM 系统背景层显式摘掉
+    /// （WindowBackdrop.RemoveBackdrop），随后 ApplyStyle 重申背景本地值。
+    /// ApplyFluentTheme 已传 WindowBackdropType.None 从源头关停，这一步是
+    /// 双保险——专治「旧版本/旧路径已糊上、本次 Apply 没机会再碰它」的残留。
+    /// 悬浮窗尚未创建时（InitFluentUi 路径）静默跳过。每次执行都写一行日志，
+    /// 与 [透明自检] 探针互相印证（切主题后四角应采到窗外真实底色）。
+    /// </summary>
+    private static void StripFloatingBackdrop()
+    {
+        if (_floating == null) return;
+        try
+        {
+            Wpf.Ui.Controls.WindowBackdrop.RemoveBackdrop(_floating);
+            _floating.ApplyStyle();
+            AppLog.Write("[透明修复] 主题应用后已对悬浮窗 RemoveBackdrop（摘除系统背景层）并重申样式");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"[透明修复] RemoveBackdrop 失败（忽略）：{ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -483,8 +529,10 @@ public static class Program
         Theme.Apply(_settings.UiTheme);
         ApplyFluentTheme();
         // 主题切换兜底（v0.7 起）：让悬浮窗在主题应用**之后**再重申一遍自己的样式。
-        // v0.8.2 起这遍重申写的是显式 Transparent 本地值（WPF 属性优先级最高），
-        // 且悬浮窗套了空 Style 隔离隐含样式——主题资源再怎么刷新也盖不住。
+        // 注：v0.8.4 已查实变白真凶是 WPF-UI 给 MainWindow（=悬浮窗）糊的
+        // Mica 系统背景层，与 WPF 属性/样式无关——源头关停与摘层都在
+        // ApplyFluentTheme 里（None + StripFloatingBackdrop）；这里这遍
+        // ApplyStyle 只作额外的样式重申，无害保留。
         _floating.ApplyStyle();
         AppLog.Write($"[设置] 界面主题切换为「{Theme.Current.DisplayName}」（{_settings.UiTheme}）");
         // v0.8.3：主题切换是「变白案」的已知触发点——切换后 2 秒采一次屏幕实测像素取证

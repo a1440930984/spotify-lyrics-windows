@@ -6,25 +6,25 @@ using SpotifyLyricsWin.Core;
 namespace SpotifyLyricsWin.Ui;
 
 /// <summary>
-/// 全 App 统一的图标加载（v0.8.3）：托盘（System.Drawing.Icon）与各窗口
-/// （WPF ImageSource）共用这一份逻辑，不再各加载各的。
+/// 全 App 统一的图标加载：托盘（System.Drawing.Icon）与各窗口（WPF ImageSource）
+/// 共用这一份逻辑，不再各加载各的。启动时经 ReportToLog 自报来源/装机文件
+/// 指纹/帧列表（v0.8.3 起保留）——装机 app.ico 若不是预期的那份（更新器没
+/// 覆盖成功等），日志一眼可见。
 ///
-/// 为什么要统一 + 定死选帧：app.ico 文件本身已逐字节恢复 v0.7（MD5 验过），
-/// 但真机任务栏/托盘显示仍与 v0.7 时代不完全一样、偏小。剩余嫌疑之一是多帧 ICO
-/// 的选帧由框架决定（new Icon(path) / BitmapImage 各挑各的，可能拿到小帧，
-/// 任务栏便只居中不放大）。本类在首次加载时把 app.ico 读进来，经
-/// Core.IcoFrames 抽出**最大帧**拼成单帧 ICO 字节，之后所有加载都吃这份字节，
-/// 选帧从此是确定行为。读不到文件/解析失败时返回 null，由调用方走原有回退
-/// （托盘回退运行时绘制，窗口回退不设图标）。
-///
-/// 顺带把装机文件的指纹（MD5 前 8 位）与帧列表缓存在这里，Program 启动时
-/// 经 ReportToLog 写一行 [图标] 日志——Sun 下次回传日志即可实锤他机器上
-/// app.ico 到底是不是 v0.7 那份（更新器没覆盖成功时指纹会对不上）。
+/// 选帧策略（v0.8.4 改回多帧）：v0.8.3 曾把 app.ico 抽成「只含 256 最大帧」
+/// 的单帧字节，想把选帧定死；真机反馈大小对了但**失真**——托盘/任务栏只有
+/// 十几到几十像素，大图硬缩必然发糊。本版改回 v0.7 时代的原始机制：托盘与
+/// 窗口图标一律吃 app.ico 的**原始多帧字节**（new Icon(stream) 保留全部帧，
+/// 由系统按每个显示面需要的尺寸自己选帧）；唯一例外是 WPF 标题栏的
+/// ImageSource——那是位图缩放链，给 BitmapImage 设 DecodePixelWidth 为
+/// 标题栏显示档（约 20 DIP × DPI 缩放，见 Core.IconSizing），让解码器
+/// 按档挑帧解码，不再拿 256 帧硬缩。读不到文件/解析失败返回 null，
+/// 调用方走原有回退（托盘回退运行时绘制，窗口回退不设图标）。
 /// </summary>
 public static class AppIcon
 {
     private static bool _loaded;
-    private static byte[]? _largestFrameIco;   // 只含最大帧的 ICO 字节；不可用时为 null
+    private static byte[]? _icoBytes;          // app.ico 原始多帧字节；不可用时为 null
     private static string _source = "运行时绘制";
     private static string _md5Prefix = "-";
     private static string _frameList = "-";
@@ -41,8 +41,7 @@ public static class AppIcon
             byte[] bytes = File.ReadAllBytes(ico);
             var frames = IcoFrames.Parse(bytes);
             if (frames.Count == 0) return;
-            _largestFrameIco = IcoFrames.ExtractLargestFrameIco(bytes);
-            if (_largestFrameIco == null) return;
+            _icoBytes = bytes;
             _source = "file";
             _md5Prefix = IcoFrames.Md5Prefix8(bytes);
             _frameList = IcoFrames.FrameListText(frames);
@@ -57,30 +56,37 @@ public static class AppIcon
         AppLog.Write($"[图标] 来源={_source} 文件MD5={_md5Prefix} 帧={_frameList}");
     }
 
-    /// <summary>托盘用：从最大帧字节构造 Icon；不可用返回 null（调用方回退运行时绘制）。</summary>
+    /// <summary>
+    /// 托盘/窗口用：从原始多帧字节构造 Icon（保留全部帧，系统按显示面选帧）；
+    /// 不可用返回 null（调用方回退运行时绘制）。
+    /// </summary>
     public static Icon? LoadDrawingIcon()
     {
         EnsureLoaded();
-        if (_largestFrameIco == null) return null;
+        if (_icoBytes == null) return null;
         try
         {
-            using var ms = new MemoryStream(_largestFrameIco);
+            using var ms = new MemoryStream(_icoBytes);
             return new Icon(ms);
         }
         catch { return null; }
     }
 
-    /// <summary>窗口用：同一份最大帧字节解出的 ImageSource（缓存+冻结，全窗共用）。</summary>
+    /// <summary>
+    /// 标题栏小 logo 用：原始多帧字节解出的 ImageSource，按标题栏显示档设
+    /// DecodePixelWidth（见类注释）；缓存+冻结，全窗共用。
+    /// </summary>
     public static BitmapImage? LoadImageSource()
     {
         EnsureLoaded();
-        if (_largestFrameIco == null) return null;
+        if (_icoBytes == null) return null;
         if (_cachedImage != null) return _cachedImage;
         try
         {
             var bmp = new BitmapImage();
             bmp.BeginInit();
-            bmp.StreamSource = new MemoryStream(_largestFrameIco);
+            bmp.StreamSource = new MemoryStream(_icoBytes);
+            bmp.DecodePixelWidth = IconSizing.TitleBarDecodePixelWidth(CurrentDpiScale());
             bmp.CacheOption = BitmapCacheOption.OnLoad;
             bmp.EndInit();
             bmp.Freeze();
@@ -88,5 +94,16 @@ public static class AppIcon
             return bmp;
         }
         catch { return null; }
+    }
+
+    /// <summary>系统 DPI 缩放（1.0 = 100%）；取不到返回 0，由 IconSizing 回退到 32。</summary>
+    private static double CurrentDpiScale()
+    {
+        try
+        {
+            using var g = Graphics.FromHwnd(IntPtr.Zero);
+            return g.DpiX / 96.0;
+        }
+        catch { return 0; }
     }
 }
